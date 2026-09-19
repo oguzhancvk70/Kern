@@ -1,0 +1,19 @@
+.claude/structure.md
+
+# Rust
+/target
+/target.nosync
+**/*.rs.bk
+
+# Swift / Xcode
+apps/macos/Generated/
+apps/macos/Kern.xcodeproj/
+apps/macos/Info.plist
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# macOS
+.DS_Store

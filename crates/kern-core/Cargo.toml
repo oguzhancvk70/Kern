@@ -1,0 +1,9 @@
+[package]
+name = "kern-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kern-syntax = { version = "0.1.0", path = "../kern-syntax" }
+kern-text.workspace = true

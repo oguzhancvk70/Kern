@@ -1,0 +1,49 @@
+name: Kern
+options:
+  bundleIdPrefix: dev.kern
+  deploymentTarget:
+    macOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  Kern:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+      - path: Generated
+        createIntermediateGroups: true
+      - path: Resources/FileIcons
+        type: folder
+      - Resources/AppIcon.icns
+    info:
+      path: Info.plist
+      properties:
+        CFBundleName: Kern
+        CFBundleDisplayName: Kern
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleIconFile: AppIcon
+        NSPrincipalClass: NSApplication
+        NSHighResolutionCapable: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Text
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.text, public.data]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.kern.Kern
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridge/Kern-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(PROJECT_DIR)/Generated
+        OTHER_LDFLAGS: -lkern_ffi
+      configs:
+        Debug:
+          LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/../../target.nosync/universal/debug
+        Release:
+          LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/../../target.nosync/universal/release
+    preBuildScripts:
+      - name: Rust kern-ffi
+        script: '"$PROJECT_DIR/../../scripts/build-rust.sh"'
+        basedOnDependencyAnalysis: false
