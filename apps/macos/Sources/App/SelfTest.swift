@@ -27,13 +27,16 @@ final class SelfTest {
     private func read(_ name: String) -> String { (try? String(contentsOf: file(name), encoding: .utf8)) ?? "<yok>" }
     private func step(_ name: String, _ f: @escaping () -> Void) { steps.append((name, f)) }
 
-    // koşul sağlanana (ya da süre dolana) kadar bekler, sonra kontrol eder
+    // koşul sağlanana (ya da süre dolana) kadar adımı yeniden kuyruğa koyar; ana kuyruk bloklanmaz
     private func wait(_ name: String, timeout: TimeInterval = 10, _ cond: @escaping () -> Bool) {
-        step("bekle: \(name)") {
-            let deadline = Date().addingTimeInterval(timeout)
-            while !cond() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
-            self.check(name, cond())
+        var deadline: Date?
+        var poll: (() -> Void)!
+        poll = {
+            let d = deadline ?? Date().addingTimeInterval(timeout)
+            deadline = d
+            if cond() || Date() >= d { self.check(name, cond()) } else { self.steps.insert(("bekle: \(name)", poll), at: 0) }
         }
+        step("bekle: \(name)", poll)
     }
 
     func start() {
@@ -51,7 +54,7 @@ final class SelfTest {
     private func next() {
         guard !steps.isEmpty else { return finish() }
         let (name, f) = steps.removeFirst()
-        lines.append("# \(name)")
+        if lines.last != "# \(name)" { lines.append("# \(name)") }
         f()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.next() }
     }
@@ -360,6 +363,73 @@ final class SelfTest {
             let s = SessionStore.load(self.dir)
             self.check("oturum beş sekme", s?.tabs.count == 5)
             self.check("etkin sekme b.rs", s.map { $0.tabs[$0.active].path.hasSuffix("b.rs") } ?? false)
+        }
+        gitScenarios()
+    }
+
+    @discardableResult
+    private func git(_ args: String...) -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = args
+        p.currentDirectoryURL = dir
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = Pipe()
+        try? p.run()
+        p.waitUntilExit()
+        return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
+    private func gitScenarios() {
+        let scm = { self.c.root.scm }
+        step("git kurulumu") {
+            let g = parseGitStatus("M \ta\n M\tb\nMM\tc\n??\td\nUU\te\n")
+            self.check("durum ayrıştırma", g.map(\.kind) == [.merge, .staged, .changes] && g.map(\.files.count) == [1, 2, 3])
+            try? "one\ntwo\nthree\n".write(to: self.file("g.txt"), atomically: true, encoding: .utf8)
+            self.git("init", "-q", "-b", "main")
+            self.git("config", "user.email", "t@example.com")
+            self.git("config", "user.name", "Tester")
+            self.git("add", "-A")
+            self.git("commit", "-q", "-m", "first")
+            self.c.gitOpen(self.dir)
+        }
+        wait("depo bulundu, temiz") { self.c.git.repo != nil && scm().hasRepo && scm().groups.isEmpty && self.c.git.branch == "main" }
+        step("gutter") {
+            self.c.openFile(self.file("g.txt"))
+            guard let v = self.view else { return self.check("g.txt", false) }
+            v.editor.select_range(1, 0, 3)
+            v.editor.insert_text("TWO")
+            v.changed(edited: true)
+        }
+        wait("gutter M işareti") { self.view?.gitMarks == [1: "M"] }
+        wait("blame durum çubuğunda") { self.c.git.blame == "✎ Uncommitted changes" && self.c.root.status.left.contains(self.c.git.blame) }
+        step("kaydet") { self.c.saveDocument(nil) }
+        wait("değişiklik listelendi") { scm().groups.first { $0.kind == .changes }?.files.map(\.path) == ["g.txt"] }
+        step("commit") {
+            scm().message.field.stringValue = "second"
+            scm().onCommit?("second")
+        }
+        wait("commit edildi") { scm().groups.isEmpty && self.git("log", "--oneline").split(separator: "\n").count == 2 }
+        wait("commit sonrası gutter temiz") { self.view?.gitMarks.isEmpty == true }
+        step("dal") { self.c.gitRun { $0.checkout("feature", true) } }
+        wait("dal değişti") { self.c.git.branch == "feature" && self.c.root.status.left.contains("⎇ feature") }
+        step("çakışma") {
+            guard let v = self.view, let tab = self.c.activeTab else { return self.check("g.txt", false) }
+            v.editor.select_all()
+            v.editor.insert_text("a\n<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> b\nz\n")
+            v.changed(edited: true)
+            self.c.gitMarks(tab)
+            self.check("çakışma satırları", v.conflictLines == [1: 0, 2: 1, 3: 0, 4: 2, 5: 0])
+            v.editor.click(2, 0, false)
+            self.c.acceptBothChanges(nil)
+            self.check("iki taraf kabul", v.editor.text().toString() == "a\nmine\ntheirs\nz\n")
+            _ = v.editor.undo()
+            v.editor.click(4, 0, false)
+            self.c.acceptIncomingChange(nil)
+            self.check("gelen kabul", v.editor.text().toString() == "a\ntheirs\nz\n")
+            self.c.gitMarks(tab)
+            self.check("çakışma vurgusu kalktı", v.conflictLines.isEmpty)
         }
     }
 }

@@ -77,6 +77,9 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     // dil özellikleri
     var diagnostics: [Diagnostic] = [] { didSet { needsDisplay = true } }
     var ghostText: String? { didSet { if oldValue != ghostText { needsDisplay = true } } }
+    // git: satır → 'A'/'M'/'D'; çakışma: satır → 0 işaret, 1 mevcut, 2 gelen
+    var gitMarks: [Int: Character] = [:] { didSet { needsDisplay = true } }
+    var conflictLines: [Int: Int] = [:] { didSet { needsDisplay = true } }
     var keyInterceptor: ((String) -> Bool)?
     var onTyped: ((String) -> Void)?
     var onHover: ((Int, Int, NSPoint) -> Void)?
@@ -338,6 +341,10 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 }
             }
 
+            if let c = conflictLines[i] {
+                back.append(.rect(gutter, y, size.width - gutter, lh, c == 2 ? theme.conflictIncoming : theme.conflictCurrent))
+            }
+
             for m in matches[i] ?? [] {
                 let ms = Int(m[1]), me = Int(m[2])
                 guard me > segStart, ms < segEnd else { continue }
@@ -396,6 +403,15 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                     let mark = layout.shape(folds[i] != nil ? "›" : "⌄")
                     appendGlyphs(mark, x: gutter - layout.charWidth * 1.6, baseline: y + layout.baseline,
                                  into: &front, clip: false) { _ in self.theme.lineNumber }
+                }
+            }
+            // git gutter işareti
+            if let k = gitMarks[i] {
+                let gx = gutter - layout.charWidth * 2.3, bw = 3 * hair
+                if k == "D" {
+                    front.append(.rect(gx, y - 2 * hair, bw * 2, 4 * hair, theme.gitDeleted))
+                } else {
+                    front.append(.rect(gx, y, bw, lh, k == "A" ? theme.gitAdded : theme.gitModified))
                 }
             }
             if isLast, folds[i] != nil {

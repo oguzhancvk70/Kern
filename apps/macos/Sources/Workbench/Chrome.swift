@@ -99,7 +99,8 @@ final class ActivityBar: FlippedView {
     var onSelect: ((Int) -> Void)?
     var selected: Int? { didSet { refresh() } }
     private var buttons: [NSButton] = []
-    private let items = [("doc.on.doc", "Explorer (⇧⌘E)"), ("magnifyingglass", "Search (⇧⌘F)"), ("sparkles", "AI (⇧⌘I)")]
+    private let items = [("doc.on.doc", "Explorer (⇧⌘E)"), ("magnifyingglass", "Search (⇧⌘F)"), ("sparkles", "AI (⇧⌘I)"),
+                                 ("arrow.triangle.branch", "Source Control (⌃⇧G)")]
 
     override init(frame: NSRect) {
         super.init(frame: frame)

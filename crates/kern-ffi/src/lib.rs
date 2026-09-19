@@ -26,6 +26,7 @@ mod ffi {
     extern "Rust" {
         fn kern_version() -> String;
         fn find_error(query: &str, flags: u8) -> String;
+        fn vcs_conflicts(text: &str) -> String;
     }
 
     extern "Rust" {
@@ -182,6 +183,25 @@ mod ffi {
         fn contributions(&self) -> String;
         fn run_command(&self, ext: &str, command: &str, ctx_json: &str, root: &str) -> String;
         fn inspect(&self, dir: &str) -> String;
+    }
+
+    extern "Rust" {
+        type KernRepo;
+
+        fn discover_repo(path: &str) -> Option<KernRepo>;
+        fn root(&self) -> String;
+        fn branch(&self) -> String;
+        fn branches(&self) -> String;
+        fn status(&self) -> String;
+        fn stage(&self, paths: &str) -> String;
+        fn unstage(&self, paths: &str) -> String;
+        fn discard(&self, paths: &str) -> String;
+        fn commit(&self, message: &str, all: bool) -> String;
+        fn checkout(&self, branch: &str, create: bool) -> String;
+        fn push(&self) -> String;
+        fn pull(&self) -> String;
+        fn blame(&self, path: &str, line: usize, contents: &str) -> String;
+        fn line_changes(&self, path: &str, current: &str) -> String;
     }
 
     extern "Rust" {
@@ -458,6 +478,98 @@ impl KernExtensions {
             Ok(e) => e.manifest.to_string(),
             Err(e) => kern_lsp::serde_json::json!({ "error": e }).to_string(),
         }
+    }
+}
+
+// git; komutlar JSON döner: {"ok": çıktı} ya da {"error": mesaj}. Yavaş olabilir → arka plan thread'i
+pub struct KernRepo(kern_vcs::Repo);
+
+fn discover_repo(path: &str) -> Option<KernRepo> {
+    kern_vcs::Repo::discover(std::path::Path::new(path)).map(KernRepo)
+}
+
+fn vcs_result(r: Result<String, String>) -> String {
+    use kern_lsp::serde_json::json;
+    match r {
+        Ok(s) => json!({ "ok": s }).to_string(),
+        Err(e) => json!({ "error": e }).to_string(),
+    }
+}
+
+// satır başına: satır \t adet \t tür
+fn format_changes(changes: &[kern_vcs::LineChange]) -> String {
+    changes.iter().map(|(l, n, k)| format!("{l}\t{n}\t{k}\n")).collect()
+}
+
+// satır başına: başlangıç \t orta \t bitiş
+fn vcs_conflicts(text: &str) -> String {
+    kern_vcs::conflicts(text).iter().map(|(s, m, e)| format!("{s}\t{m}\t{e}\n")).collect()
+}
+
+impl KernRepo {
+    fn paths(list: &str) -> Vec<&str> {
+        list.lines().filter(|l| !l.is_empty()).collect()
+    }
+
+    fn root(&self) -> String {
+        self.0.root.to_string_lossy().into_owned()
+    }
+
+    fn branch(&self) -> String {
+        self.0.branch()
+    }
+
+    // satır başına bir dal
+    fn branches(&self) -> String {
+        self.0.branches().map(|b| b.join("\n")).unwrap_or_default()
+    }
+
+    // satır başına: X Y \t yol (göreli)
+    fn status(&self) -> String {
+        match self.0.status() {
+            Ok(items) => items.iter().map(|f| format!("{}{}\t{}\n", f.index, f.worktree, f.path)).collect(),
+            Err(_) => String::new(),
+        }
+    }
+
+    fn stage(&self, paths: &str) -> String {
+        vcs_result(self.0.stage(&Self::paths(paths)).map(|_| String::new()))
+    }
+
+    fn unstage(&self, paths: &str) -> String {
+        vcs_result(self.0.unstage(&Self::paths(paths)).map(|_| String::new()))
+    }
+
+    fn discard(&self, paths: &str) -> String {
+        vcs_result(self.0.discard(&Self::paths(paths)).map(|_| String::new()))
+    }
+
+    fn commit(&self, message: &str, all: bool) -> String {
+        vcs_result(self.0.commit(message, all))
+    }
+
+    fn checkout(&self, branch: &str, create: bool) -> String {
+        vcs_result(self.0.checkout(branch, create))
+    }
+
+    fn push(&self) -> String {
+        vcs_result(self.0.push())
+    }
+
+    fn pull(&self) -> String {
+        vcs_result(self.0.pull())
+    }
+
+    // "yazar \t unix zamanı \t özet"; contents boşsa diskteki dosya
+    fn blame(&self, path: &str, line: usize, contents: &str) -> String {
+        let c = if contents.is_empty() { None } else { Some(contents) };
+        self.0.blame_line(std::path::Path::new(path), line, c).unwrap_or_default()
+    }
+
+    // HEAD'e göre; izlenmeyen dosyada tümü eklenmiş sayılır
+    fn line_changes(&self, path: &str, current: &str) -> String {
+        let base = self.0.head_text(std::path::Path::new(path)).unwrap_or_default();
+        format_changes(&kern_vcs::line_changes(&base, current))
     }
 }
 

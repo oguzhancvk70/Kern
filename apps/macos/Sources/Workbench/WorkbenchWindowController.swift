@@ -65,6 +65,7 @@ final class WorkbenchView: FlippedView {
     let explorer = ExplorerView()
     let search = SearchPanel()
     let ai = ChatPanel()
+    let scm = SourceControlPanel()
     let handle = SplitHandle()
     let welcome = WelcomeView()
     let findBar = FindBar()
@@ -112,7 +113,7 @@ final class WorkbenchView: FlippedView {
         background = Palette.editor
         findBar.isHidden = true
         terminalHandle.vertical = true
-        [activity, explorer, search, ai, welcome, findBar, terminal, terminalHandle, handle, status].forEach(addSubview)
+        [activity, explorer, search, ai, scm, welcome, findBar, terminal, terminalHandle, handle, status].forEach(addSubview)
         handle.onDrag = { [weak self] dx in
             guard let self else { return }
             self.sidebarWidth = min(max(170, self.sidebarWidth + dx), 640)
@@ -142,6 +143,8 @@ final class WorkbenchView: FlippedView {
         explorer.isHidden = !(sidebarVisible && panel == 0)
         search.isHidden = !(sidebarVisible && panel == 1)
         ai.isHidden = !(sidebarVisible && panel == 2)
+        scm.frame = explorer.frame
+        scm.isHidden = !(sidebarVisible && panel == 3)
         handle.frame = NSRect(x: act + side - 2, y: 0, width: 5, height: body)
         handle.isHidden = !sidebarVisible
 
@@ -209,6 +212,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
     var acceptingGhost = false
     private var fsRefresh: DispatchWorkItem?
     private var askingConflict = false
+    let git = GitState()
 
     var activeTab: EditorTab? { active >= 0 && active < tabs.count ? tabs[active] : nil }
     var isEmpty: Bool { folder == nil && allTabs.allSatisfy(\.isPristine) }
@@ -295,6 +299,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         }
         watcher.onChange = { [weak self] paths in self?.filesChanged(paths) }
         wireAI()
+        wireGit()
     }
 
     // ayarlar
@@ -395,6 +400,9 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             fsRefresh = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
         }
+        // FSEvents /private/var bildirir, klasör /var olabilir
+        let bare = { (p: String) in p.hasPrefix("/private/") ? String(p.dropFirst(8)) : p }
+        if let folder, paths.contains(where: { bare($0).hasPrefix(bare(folder.path) + "/") }) { scheduleGitRefresh() }
         let touched = Set(paths.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path })
         checkDisk(only: touched)
     }
@@ -479,6 +487,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         root.explorer.setRoot(url)
         root.terminal.cwd = url.path
         readBranch()
+        gitOpen(url)
         updateWatch()
         Settings.shared.setProject(url)
         restartLanguage()
@@ -522,6 +531,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
 
     private func refreshWorkspace() {
         readBranch()
+        scheduleGitRefresh()
         guard let ws = workspace else { return }
         queue.async { ws.refresh() }
     }
@@ -599,8 +609,10 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             if edited {
                 self.siblings(tab).forEach { $0.view.needsDisplay = true }
                 self.languageChanged(tab)
+                self.gitEdited(tab)
             }
             self.inlineCursorMoved(view)
+            self.gitCursorMoved(view)
             guard view === self.activeTab?.view else { return }
             self.update(tabsOnly: !edited)
             if edited && !self.root.findBar.isHidden { self.updateFindCount() }
@@ -609,6 +621,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         tabs.insert(tab, at: at)
         select(at)
         updateWatch()
+        gitMarks(tab)
         return tab
     }
 
@@ -752,8 +765,8 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
                      e.line_ending_name().toString(), e.language().toString()]
         }
         root.status.right = right
-        root.status.left = [folder.map { "⌂ \($0.lastPathComponent)" } ?? "No Folder"] + (branch.map { ["⎇ \($0)"] } ?? [])
-            + ["⊗ \(diagnosticCounts.errors)  ⚠ \(diagnosticCounts.warnings)"]
+        root.status.left = [folder.map { "⌂ \($0.lastPathComponent)" } ?? "No Folder"] + ((git.branch.isEmpty ? branch : git.branch).map { ["⎇ \($0)"] } ?? [])
+            + ["⊗ \(diagnosticCounts.errors)  ⚠ \(diagnosticCounts.warnings)"] + (git.blame.isEmpty ? [] : [git.blame])
         if let tab, !tab.path.isEmpty, let s = language?.status(tab.path), !s.isEmpty {
             right.append(s == "ok" ? "{ } LSP" : s.hasPrefix("missing") ? "⚠ No Language Server" : s == "starting" ? "LSP…" : "⚠ LSP Error")
         }

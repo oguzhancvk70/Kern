@@ -18,6 +18,11 @@ struct Theme {
     var error = rgb(0xF14C4C)
     var warning = rgb(0xCCA700)
     var info = rgb(0x3794FF)
+    var gitAdded = rgb(0x2EA043)
+    var gitModified = rgb(0x0078D4)
+    var gitDeleted = rgb(0xF85149)
+    var conflictCurrent = rgb(0x2EA043, 0.18)
+    var conflictIncoming = rgb(0x0078D4, 0.18)
     var syntax: [SIMD4<Float>]
 
     func color(for token: UInt32) -> SIMD4<Float> {

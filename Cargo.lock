@@ -665,6 +665,7 @@ dependencies = [
  "kern-lsp",
  "kern-search",
  "kern-term",
+ "kern-vcs",
  "swift-bridge",
  "swift-bridge-build",
 ]

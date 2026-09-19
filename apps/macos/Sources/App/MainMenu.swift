@@ -82,6 +82,7 @@ enum MainMenu {
             .separator(),
             item("Explorer", "showExplorer:", "e", [.command, .shift]),
             item("Search", "showSearch:", "f", [.command, .shift]),
+            item("Source Control", "showSourceControl:", "g", [.control, .shift]),
             item("Toggle Sidebar", "toggleSidebarVisibility:", "b"),
             item("Terminal", "toggleTerminal:", "`", [.control]),
             .separator(),
@@ -111,6 +112,16 @@ enum MainMenu {
             .separator(),
             item("Next Editor", "nextEditor:", right, [.command, .option]),
             item("Previous Editor", "previousEditor:", left, [.command, .option]),
+        ]))
+
+        main.addItem(submenu("Git", [
+            item("Checkout to Branch…", "showBranchPicker:"),
+            item("Pull", "gitPull:"),
+            item("Push", "gitPush:"),
+            .separator(),
+            item("Accept Current Change", "acceptCurrentChange:"),
+            item("Accept Incoming Change", "acceptIncomingChange:"),
+            item("Accept Both Changes", "acceptBothChanges:"),
         ]))
 
         main.addItem(submenu("AI", [
