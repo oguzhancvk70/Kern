@@ -18,6 +18,9 @@ pub struct ByteEdit {
 pub struct Buffer {
     rope: Rope,
     edits: Vec<ByteEdit>,
+    // düzenlemelerle birlikte kayan karakter konumları (diğer görünümlerin imleçleri)
+    pub marks: Vec<usize>,
+    version: u64,
 }
 
 pub fn is_line_break(c: char) -> bool {
@@ -37,15 +40,20 @@ fn ending_len(s: RopeSlice) -> usize {
 
 impl Buffer {
     pub fn new(text: &str) -> Self {
-        Self { rope: Rope::from_str(text), edits: Vec::new() }
+        Self { rope: Rope::from_str(text), edits: Vec::new(), marks: Vec::new(), version: 0 }
     }
 
     pub fn from_reader(reader: impl Read) -> io::Result<Self> {
-        Ok(Self { rope: Rope::from_reader(reader)?, edits: Vec::new() })
+        Ok(Self { rope: Rope::from_reader(reader)?, edits: Vec::new(), marks: Vec::new(), version: 0 })
     }
 
     pub fn rope(&self) -> &Rope {
         &self.rope
+    }
+
+    // her düzenlemede artar
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn take_edits(&mut self) -> Vec<ByteEdit> {
@@ -125,6 +133,13 @@ impl Buffer {
         let b = self.rope.char_to_byte(char_idx);
         let start = self.point(b);
         self.rope.insert(char_idx, text);
+        self.version += 1;
+        let n = text.chars().count();
+        for m in &mut self.marks {
+            if *m > char_idx {
+                *m += n;
+            }
+        }
         let end = b + text.len();
         let new_end = self.point(end);
         self.edits.push(ByteEdit {
@@ -140,7 +155,15 @@ impl Buffer {
         let e = self.rope.char_to_byte(range.end);
         let start = self.point(s);
         let old_end = self.point(e);
+        for m in &mut self.marks {
+            if *m >= range.end {
+                *m -= range.len();
+            } else if *m > range.start {
+                *m = range.start;
+            }
+        }
         self.rope.remove(range);
+        self.version += 1;
         self.edits.push(ByteEdit {
             start_byte: s, old_end_byte: e, new_end_byte: s, start, old_end, new_end: start,
         });
@@ -173,6 +196,12 @@ mod tests {
 
     #[test]
     fn lines_strip_endings() {
+        let mut m = Buffer::new("abcdef");
+        m.marks = vec![1, 3, 5];
+        m.remove(2..4);
+        assert_eq!(m.marks, vec![1, 2, 3]);
+        m.insert(2, "XY");
+        assert_eq!(m.marks, vec![1, 2, 5]);
         let b = Buffer::new("a\r\nb\nc");
         assert_eq!(b.len_lines(), 3);
         assert_eq!(b.line(0), "a");

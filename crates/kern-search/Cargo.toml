@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 ignore = "0.4.33"
+kern-text = { version = "0.1.0", path = "../kern-text" }
+regex = "1.13.1"

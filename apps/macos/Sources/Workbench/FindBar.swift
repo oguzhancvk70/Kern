@@ -1,7 +1,7 @@
 import AppKit
 
 final class FindBar: FlippedView, NSTextFieldDelegate {
-    var onQuery: ((String, Bool) -> Void)?
+    var onQuery: ((String, UInt8) -> Void)?
     var onNext: ((Bool) -> Void)?
     var onReplace: ((String, Bool) -> Void)?
     var onClose: (() -> Void)?
@@ -9,10 +9,12 @@ final class FindBar: FlippedView, NSTextFieldDelegate {
     let find = InputBox(placeholder: "Find")
     let replace = InputBox(placeholder: "Replace")
     private(set) var showsReplace = false
-    private(set) var caseSensitive = false
+    private let caseButton = OptionToggle("Aa", tip: "Match Case")
+    private let wordButton = OptionToggle("ab", tip: "Match Whole Word")
+    private let regexButton = OptionToggle(".*", tip: "Use Regular Expression")
+    var flags: UInt8 { (caseButton.isOn ? 1 : 0) | (wordButton.isOn ? 2 : 0) | (regexButton.isOn ? 4 : 0) }
     private let count = makeLabel("", size: 12, color: Palette.text)
     private lazy var toggle = iconButton("chevron.right", tooltip: "Toggle Replace", size: 11, target: self, action: #selector(toggleReplace))
-    private lazy var caseButton = iconButton("textformat", tooltip: "Match Case", size: 12, target: self, action: #selector(toggleCase))
     private lazy var prev = iconButton("arrow.up", tooltip: "Previous Match (⇧⏎)", size: 12, target: self, action: #selector(prevTapped))
     private lazy var next = iconButton("arrow.down", tooltip: "Next Match (⏎)", size: 12, target: self, action: #selector(nextTapped))
     private lazy var close = iconButton("xmark", tooltip: "Close (Esc)", size: 12, target: self, action: #selector(closeTapped))
@@ -28,7 +30,7 @@ final class FindBar: FlippedView, NSTextFieldDelegate {
         wantsLayer = true
         layer?.cornerRadius = 4
         layer?.borderWidth = 1
-        layer?.borderColor = Palette.border.cgColor
+        border = Palette.border
         shadow = NSShadow()
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = 0.5
@@ -36,8 +38,9 @@ final class FindBar: FlippedView, NSTextFieldDelegate {
         layer?.shadowOffset = CGSize(width: 0, height: -2)
         find.field.delegate = self
         replace.field.delegate = self
-        find.trailingInset = 28
-        [toggle, find, caseButton, count, prev, next, close, replace, replaceOne, replaceAll].forEach(addSubview)
+        find.trailingInset = 80
+        [caseButton, wordButton, regexButton].forEach { $0.onToggle = { [weak self] in self.map { $0.onQuery?($0.query, $0.flags) } } }
+        [toggle, find, caseButton, wordButton, regexButton, count, prev, next, close, replace, replaceOne, replaceAll].forEach(addSubview)
         setReplace(false)
     }
 
@@ -49,7 +52,9 @@ final class FindBar: FlippedView, NSTextFieldDelegate {
         let boxW = w - 22 - 176
         toggle.frame = NSRect(x: 3, y: 0, width: 16, height: bounds.height)
         find.frame = NSRect(x: 22, y: 5, width: boxW, height: 26)
-        caseButton.frame = NSRect(x: 22 + boxW - 26, y: 8, width: 22, height: 20)
+        for (i, b) in [caseButton, wordButton, regexButton].enumerated() {
+            b.frame = NSRect(x: 22 + boxW - 78 + CGFloat(i) * 25, y: 8, width: 23, height: 20)
+        }
         count.frame = NSRect(x: 22 + boxW + 8, y: 10, width: 84, height: 16)
         prev.frame = NSRect(x: w - 78, y: 7, width: 22, height: 22)
         next.frame = NSRect(x: w - 54, y: 7, width: 22, height: 22)
@@ -64,7 +69,7 @@ final class FindBar: FlippedView, NSTextFieldDelegate {
         if let query, !query.isEmpty { find.field.stringValue = query }
         window?.makeFirstResponder(withReplace && query != nil ? replace.field : find.field)
         find.field.currentEditor()?.selectAll(nil)
-        onQuery?(self.query, caseSensitive)
+        onQuery?(self.query, flags)
     }
 
     func setCount(_ text: String, empty: Bool) {
@@ -85,11 +90,6 @@ final class FindBar: FlippedView, NSTextFieldDelegate {
         if showsReplace { window?.makeFirstResponder(replace.field) }
     }
 
-    @objc private func toggleCase() {
-        caseSensitive.toggle()
-        caseButton.image = symbol("textformat", size: 12, color: caseSensitive ? Palette.match : Palette.icon)
-        onQuery?(query, caseSensitive)
-    }
 
     @objc private func prevTapped() { onNext?(false) }
     @objc private func nextTapped() { onNext?(true) }
@@ -98,7 +98,7 @@ final class FindBar: FlippedView, NSTextFieldDelegate {
     @objc private func replaceAllTapped() { onReplace?(replace.field.stringValue, true) }
 
     func controlTextDidChange(_ obj: Notification) {
-        if (obj.object as? NSTextField) === find.field { onQuery?(query, caseSensitive) }
+        if (obj.object as? NSTextField) === find.field { onQuery?(query, flags) }
     }
 
     func controlTextDidBeginEditing(_ obj: Notification) {

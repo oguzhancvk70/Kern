@@ -1,0 +1,9 @@
+[package]
+name = "kern-ext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1.0.151"
+wasmtime = { version = "48.0.2", default-features = false, features = ["runtime", "cranelift", "wat", "std"] }

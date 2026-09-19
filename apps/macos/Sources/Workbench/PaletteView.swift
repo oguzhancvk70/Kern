@@ -27,7 +27,7 @@ final class PaletteView: FlippedView, NSTextFieldDelegate {
         wantsLayer = true
         layer?.cornerRadius = 6
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor(hex: 0x454545).cgColor
+        border = Palette.inputBorder
         shadow = NSShadow()
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = 0.6
@@ -56,7 +56,7 @@ final class PaletteView: FlippedView, NSTextFieldDelegate {
 
     private var query: String {
         let q = input.field.stringValue
-        if q.hasPrefix(">") || q.hasPrefix(":") { return String(q.dropFirst()).trimmingCharacters(in: .whitespaces) }
+        if q.hasPrefix(">") || q.hasPrefix(":") || q.hasPrefix("@") { return String(q.dropFirst()).trimmingCharacters(in: .whitespaces) }
         return q
     }
 

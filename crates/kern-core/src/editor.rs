@@ -3,12 +3,10 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use kern_syntax::Syntax;
-use kern_text::{Edit, EditKind, History, is_line_break};
+use kern_text::{Edit, EditKind, FIND_CASE, FIND_REGEX, History, Matcher, is_line_break};
 
 use crate::Document;
 
-const TAB_WIDTH: usize = 4;
-const INDENT: &str = "    ";
 const SYNTAX_MAX_BYTES: usize = 8 * 1024 * 1024;
 const PAIRS: &[(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('\'', '\''), ('`', '`')];
 
@@ -72,6 +70,12 @@ pub struct Editor {
     line_ending: &'static str,
     language: &'static str,
     syntax: Option<Syntax>,
+    // aynı belgeyi gösteren görünümler: etkin olan + park edilmiş (seçimleri buffer.marks içinde)
+    view: u64,
+    next_view: u64,
+    parked: Vec<(u64, usize)>,
+    pub tab_width: usize,
+    pub insert_spaces: bool,
 }
 
 impl Editor {
@@ -88,9 +92,118 @@ impl Editor {
             line_ending,
             language: "Plain Text",
             syntax: None,
+            view: 1,
+            next_view: 1,
+            parked: Vec::new(),
+            tab_width: 4,
+            insert_spaces: true,
         };
         editor.detect_language();
         editor
+    }
+
+    fn indent_unit(&self) -> String {
+        if self.insert_spaces { " ".repeat(self.tab_width) } else { "\t".into() }
+    }
+
+    fn tab_text(&self, col: usize) -> String {
+        if self.insert_spaces { " ".repeat(self.tab_width - col % self.tab_width) } else { "\t".into() }
+    }
+
+    // dosyadaki girinti biçimini tahmin et (ilk 2000 satır)
+    pub fn detect_indent(&mut self) {
+        let b = &self.doc.buffer;
+        let (mut tabs, mut spaces) = (0, 0);
+        let mut widths = [0usize; 9];
+        let mut prev = 0usize;
+        for i in 0..b.len_lines().min(2000) {
+            let line = b.line_prefix(i, 200);
+            if line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with('\t') {
+                tabs += 1;
+                continue;
+            }
+            let n = line.chars().take_while(|c| *c == ' ').count();
+            if n > 0 {
+                spaces += 1;
+            }
+            let d = n.abs_diff(prev);
+            if (2..=8).contains(&d) {
+                widths[d] += 1;
+            }
+            prev = n;
+        }
+        if tabs > spaces {
+            self.insert_spaces = false;
+        } else if spaces > 0 {
+            self.insert_spaces = true;
+            if let Some((w, _)) = widths.iter().enumerate().filter(|(_, c)| **c > 0).max_by_key(|(w, c)| (**c, *w == 4)) {
+                self.tab_width = w;
+            }
+        }
+    }
+
+    // görünümler
+
+    pub fn active_view(&self) -> u64 {
+        self.view
+    }
+
+    // yeni görünüm, etkin görünümün seçimleriyle başlar
+    pub fn add_view(&mut self) -> u64 {
+        self.next_view += 1;
+        let flat = self.flat_selections();
+        self.parked.push((self.next_view, flat.len()));
+        self.doc.buffer.marks.extend(flat);
+        self.next_view
+    }
+
+    pub fn remove_view(&mut self, id: u64) {
+        if self.view == id {
+            self.view = 0;
+        } else {
+            self.take_parked(id);
+        }
+    }
+
+    pub fn activate_view(&mut self, id: u64) {
+        if self.view == id {
+            return;
+        }
+        let restored = self.take_parked(id);
+        if self.view != 0 {
+            let flat = self.flat_selections();
+            self.parked.push((self.view, flat.len()));
+            self.doc.buffer.marks.extend(flat);
+        }
+        self.view = id;
+        let len = self.doc.buffer.len_chars();
+        let mut sels = restored
+            .chunks_exact(2)
+            .map(|p| Selection { anchor: p[0].min(len), head: p[1].min(len) });
+        self.sel = sels.next().unwrap_or_default();
+        self.extra = sels.collect();
+        self.goal_col = None;
+        self.history.seal();
+    }
+
+    fn flat_selections(&self) -> Vec<usize> {
+        std::iter::once(self.sel).chain(self.extra.iter().copied()).flat_map(|s| [s.anchor, s.head]).collect()
+    }
+
+    fn take_parked(&mut self, id: u64) -> Vec<usize> {
+        let mut off = 0;
+        for i in 0..self.parked.len() {
+            let (vid, n) = self.parked[i];
+            if vid == id {
+                self.parked.remove(i);
+                return self.doc.buffer.marks.drain(off..off + n).collect();
+            }
+            off += n;
+        }
+        Vec::new()
     }
 
     fn detect_language(&mut self) {
@@ -355,7 +468,7 @@ impl Editor {
         if text.contains('\n') {
             return;
         }
-        let matches = self.find_all(&text, true, 100_000);
+        let matches = self.find_all(&text, FIND_CASE, 100_000);
         let taken: Vec<Range<usize>> = self.all_selections().iter().map(|s| s.range()).collect();
         let free = |m: &&Range<usize>| !taken.iter().any(|t| t.start < m.end && m.start < t.end);
         let from = self.sel.range().end;
@@ -382,7 +495,7 @@ impl Editor {
         }
         let primary = self.sel.range();
         self.extra = self
-            .find_all(&text, true, 10_000)
+            .find_all(&text, FIND_CASE, 10_000)
             .into_iter()
             .filter(|m| *m != primary)
             .map(|m| Selection { anchor: m.start, head: m.end })
@@ -399,6 +512,102 @@ impl Editor {
         self.page_lines = lines.max(1);
     }
 
+    // diskteki içeriği tek geri alma adımı olarak yükle
+    pub fn reload(&mut self) -> io::Result<()> {
+        let path = self.doc.path.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no path"))?;
+        let fresh = Document::open(&path)?;
+        let new_text = fresh.buffer.rope().to_string();
+        let old = self.doc.buffer.rope();
+        let new: Vec<char> = new_text.chars().collect();
+        let old_len = old.len_chars();
+        let mut pre = 0;
+        for (a, b) in old.chars().zip(new.iter()) {
+            if a != *b {
+                break;
+            }
+            pre += 1;
+        }
+        let mut suf = 0;
+        while suf < old_len - pre && suf < new.len() - pre && old.char(old_len - 1 - suf) == new[new.len() - 1 - suf] {
+            suf += 1;
+        }
+        if pre != old_len || pre != new.len() {
+            let inserted: String = new[pre..new.len() - suf].iter().collect();
+            self.history.seal();
+            self.edit_raw(pre..old_len - suf, &inserted);
+            self.history.seal();
+        }
+        let len = self.doc.buffer.len_chars();
+        self.sel = Selection { anchor: self.sel.anchor.min(len), head: self.sel.head.min(len) };
+        self.extra.clear();
+        self.goal_col = None;
+        self.doc.encoding = fresh.encoding;
+        self.doc.mtime = fresh.mtime;
+        self.line_ending = self.doc.buffer.line_ending();
+        self.saved_state = self.history.state();
+        Ok(())
+    }
+
+    // LSP düzenlemeleri: (satır, utf16 sütun, son satır, son utf16 sütun, yeni metin); tek geri alma adımı
+    pub fn apply_text_edits(&mut self, edits: &[(usize, usize, usize, usize, String)]) {
+        let b = &self.doc.buffer;
+        let mut ranges: Vec<(usize, usize, &str)> = edits
+            .iter()
+            .map(|(l0, c0, l1, c1, t)| {
+                let s = b.utf16_to_char(*l0, *c0);
+                let e = b.utf16_to_char(*l1, *c1).max(s);
+                (s, e, t.as_str())
+            })
+            .collect();
+        ranges.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        if ranges.is_empty() {
+            return;
+        }
+        // imleci işaretle takip et
+        let base = self.doc.buffer.marks.len();
+        self.doc.buffer.marks.extend([self.sel.anchor, self.sel.head]);
+        self.extra.clear();
+        self.history.begin();
+        let mut prev_start = usize::MAX;
+        for (s, e, t) in ranges {
+            if e > prev_start {
+                continue; // çakışan düzenleme
+            }
+            self.edit_raw(s..e, t);
+            prev_start = s;
+        }
+        let marks: Vec<usize> = self.doc.buffer.marks.drain(base..).collect();
+        self.sel = Selection { anchor: marks[0], head: marks[1] };
+        self.history.end(self.snap());
+        self.goal_col = None;
+    }
+
+    // kaydetmeden önce: satır sonu boşluklarını sil, dosya sonuna satır sonu ekle (tek geri alma adımı)
+    pub fn prepare_save(&mut self, trim: bool, final_newline: bool) {
+        let before = self.snap();
+        self.history.begin();
+        if trim {
+            for l in (0..self.doc.buffer.len_lines()).rev() {
+                let len = self.doc.buffer.line_len(l);
+                let start = self.doc.buffer.line_to_char(l);
+                let text = self.doc.buffer.slice(start..start + len);
+                let kept = text.trim_end_matches([' ', '\t']).chars().count();
+                if kept < len {
+                    self.edit_raw(start + kept..start + len, "");
+                }
+            }
+        }
+        let n = self.doc.buffer.len_chars();
+        if final_newline && n > 0 && !is_line_break(self.doc.buffer.char(n - 1)) {
+            let le = self.line_ending;
+            self.edit_raw(n..n, le);
+        }
+        let len = self.doc.buffer.len_chars();
+        self.sel = Selection { anchor: before.0.anchor.min(len), head: before.0.head.min(len) };
+        self.extra.retain(|s| s.head <= len && s.anchor <= len);
+        self.history.end(self.snap());
+    }
+
     pub fn save(&mut self) -> io::Result<()> {
         self.doc.save()?;
         self.history.seal();
@@ -407,8 +616,11 @@ impl Editor {
     }
 
     pub fn save_as(&mut self, path: impl Into<PathBuf>) -> io::Result<()> {
-        self.doc.path = Some(path.into());
-        self.save()?;
+        let old = self.doc.path.replace(path.into());
+        if let Err(e) = self.save() {
+            self.doc.path = old;
+            return Err(e);
+        }
         self.detect_language();
         Ok(())
     }
@@ -655,15 +867,40 @@ impl Editor {
         let end = self.sel.range().end;
         let next = (end < b.len_chars()).then(|| b.char(end));
         let le = self.line_ending;
+        let line_text: String = (line_start..start).map(|i| b.char(i)).collect();
+        let trimmed = line_text.trim_start();
+        let next2: String = (end..(end + 2).min(b.len_chars())).map(|i| b.char(i)).collect();
+        // python: akışı bitiren deyimden sonra bir düzey geri
+        if self.language == "Python" && prev != Some(':') {
+            let word = trimmed.split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
+            if matches!(word, "return" | "pass" | "break" | "continue" | "raise") {
+                let unit = self.indent_unit();
+                let dedented = indent.strip_suffix(unit.as_str()).map(str::to_string).unwrap_or_else(|| {
+                    indent.strip_suffix('\t').unwrap_or(&indent).to_string()
+                });
+                return self.replace_selection(&format!("{le}{dedented}"), EditKind::Other);
+            }
+        }
+        // <div>|</div> → blok aç
+        if prev == Some('>') && next2 == "</" {
+            let unit = self.indent_unit();
+            let head = format!("{le}{indent}{unit}");
+            self.replace_selection(&format!("{head}{le}{indent}"), EditKind::Other);
+            self.sel = Selection::cursor(start + head.chars().count());
+            return;
+        }
         match prev {
             // {|} → blok aç
             Some(o @ ('{' | '(' | '[')) if PAIRS.iter().any(|&(a, c)| a == o && Some(c) == next) => {
-                let head = format!("{le}{indent}{INDENT}");
+                let head = format!("{le}{indent}{}", self.indent_unit());
                 self.replace_selection(&format!("{head}{le}{indent}"), EditKind::Other);
                 let at = start + head.chars().count();
                 self.sel = Selection::cursor(at);
             }
-            Some('{' | '(' | '[' | ':') => self.replace_selection(&format!("{le}{indent}{INDENT}"), EditKind::Other),
+            Some('{' | '(' | '[' | ':') => {
+                let unit = self.indent_unit();
+                self.replace_selection(&format!("{le}{indent}{unit}"), EditKind::Other)
+            }
             _ => self.replace_selection(&format!("{le}{indent}"), EditKind::Other),
         }
     }
@@ -674,7 +911,7 @@ impl Editor {
                 let b = &e.doc.buffer;
                 let start = s.range().start;
                 let col = start - b.line_to_char(b.char_to_line(start));
-                (s.range(), " ".repeat(TAB_WIDTH - col % TAB_WIDTH), None)
+                (s.range(), e.tab_text(col), None)
             });
         }
         let (first, last) = self.selected_lines();
@@ -684,8 +921,8 @@ impl Editor {
         let b = &self.doc.buffer;
         let start = self.sel.range().start;
         let col = start - b.line_to_char(b.char_to_line(start));
-        let spaces = " ".repeat(TAB_WIDTH - col % TAB_WIDTH);
-        self.replace_selection(&spaces, EditKind::Insert);
+        let text = self.tab_text(col);
+        self.replace_selection(&text, EditKind::Insert);
     }
 
     pub fn delete_backward(&mut self) {
@@ -828,6 +1065,9 @@ impl Editor {
         if self.sel.is_empty() && next == Some(c) && PAIRS.iter().any(|&(_, cl)| cl == c) {
             return self.set_cursor(head + 1);
         }
+        if self.sel.is_empty() && matches!(c, ')' | ']' | '}') && self.outdent_closing(c) {
+            return;
+        }
         if let Some(&(open, close)) = PAIRS.iter().find(|p| p.0 == c) {
             if !self.sel.is_empty() {
                 let r = self.sel.range();
@@ -848,6 +1088,51 @@ impl Editor {
             }
         }
         self.insert_text(text)
+    }
+
+    // satırda yalnız boşluk varken kapanış parantezi: açılış satırının girintisine hizala
+    fn outdent_closing(&mut self, close: char) -> bool {
+        let b = &self.doc.buffer;
+        let head = self.sel.head;
+        let line = b.char_to_line(head);
+        let ls = b.line_to_char(line);
+        if !(ls..head).all(|i| matches!(b.char(i), ' ' | '\t')) {
+            return false;
+        }
+        let open = match close {
+            ')' => '(',
+            ']' => '[',
+            _ => '{',
+        };
+        let mut depth = 0usize;
+        let mut i = ls;
+        let floor = ls.saturating_sub(200_000);
+        let found = loop {
+            if i == floor {
+                break None;
+            }
+            i -= 1;
+            let ch = b.char(i);
+            if ch == close {
+                depth += 1;
+            } else if ch == open {
+                if depth == 0 {
+                    break Some(i);
+                }
+                depth -= 1;
+            }
+        };
+        let Some(at) = found else { return false };
+        let ol = b.char_to_line(at);
+        let ols = b.line_to_char(ol);
+        let indent: String = (ols..at).map(|i| b.char(i)).take_while(|c| matches!(c, ' ' | '\t')).collect();
+        self.replace_selection_range(ls..head, &format!("{indent}{close}"));
+        true
+    }
+
+    fn replace_selection_range(&mut self, r: Range<usize>, text: &str) {
+        self.sel = Selection { anchor: r.start, head: r.end };
+        self.replace_selection(text, EditKind::Other);
     }
 
     fn selected_lines(&self) -> (usize, usize) {
@@ -941,20 +1226,21 @@ impl Editor {
         let single = first == last && self.sel.is_empty();
         let col = self.sel.head - self.doc.buffer.line_to_char(first);
         let mut delta: isize = 0;
+        let unit = self.indent_unit();
         self.history.begin();
         for l in (first..=last).rev() {
             let text = self.doc.buffer.line(l);
             let start = self.doc.buffer.line_to_char(l);
             if indent {
                 if !text.trim().is_empty() || single {
-                    self.edit_raw(start..start, INDENT);
-                    delta = INDENT.len() as isize;
+                    self.edit_raw(start..start, &unit);
+                    delta = unit.chars().count() as isize;
                 }
             } else {
                 let n = if text.starts_with('\t') {
                     1
                 } else {
-                    text.chars().take(TAB_WIDTH).take_while(|c| *c == ' ').count()
+                    text.chars().take(self.tab_width).take_while(|c| *c == ' ').count()
                 };
                 if n > 0 {
                     self.edit_raw(start..start + n, "");
@@ -1085,34 +1371,33 @@ impl Editor {
 
     // arama
 
-    fn line_matches(line: &str, query: &[char], case: bool) -> Vec<usize> {
-        let chars: Vec<char> = line.chars().collect();
-        let eq = |a: char, b: char| if case { a == b } else { a == b || a.to_lowercase().eq(b.to_lowercase()) };
+    // satırdaki eşleşmeler: (char başlangıç, char bitiş)
+    fn line_matches(m: &Matcher, line: &str) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
-        if query.is_empty() || chars.len() < query.len() {
-            return out;
-        }
-        let mut i = 0;
-        while i + query.len() <= chars.len() {
-            if query.iter().enumerate().all(|(k, q)| eq(chars[i + k], *q)) {
-                out.push(i);
-                i += query.len();
-            } else {
-                i += 1;
-            }
+        let (mut byte, mut chars) = (0, 0);
+        for r in m.find(line) {
+            chars += line[byte..r.start].chars().count();
+            let len = line[r.clone()].chars().count();
+            out.push((chars, chars + len));
+            chars += len;
+            byte = r.end;
         }
         out
     }
 
+    pub fn find_error(query: &str, flags: u8) -> Option<String> {
+        if query.is_empty() { None } else { Matcher::new(query, flags).err() }
+    }
+
     // tüm eşleşmeler (char aralıkları), sınırla
-    pub fn find_all(&self, query: &str, case: bool, limit: usize) -> Vec<Range<usize>> {
-        let q: Vec<char> = query.chars().collect();
+    pub fn find_all(&self, query: &str, flags: u8, limit: usize) -> Vec<Range<usize>> {
+        let Ok(m) = Matcher::new(query, flags) else { return Vec::new() };
         let b = &self.doc.buffer;
         let mut out = Vec::new();
         for l in 0..b.len_lines() {
             let start = b.line_to_char(l);
-            for m in Self::line_matches(&b.line(l), &q, case) {
-                out.push(start + m..start + m + q.len());
+            for (s, e) in Self::line_matches(&m, &b.line(l)) {
+                out.push(start + s..start + e);
                 if out.len() >= limit {
                     return out;
                 }
@@ -1121,24 +1406,24 @@ impl Editor {
         out
     }
 
-    pub fn find_in_lines(&self, query: &str, case: bool, first: usize, last: usize) -> Vec<u32> {
-        let q: Vec<char> = query.chars().collect();
+    pub fn find_in_lines(&self, query: &str, flags: u8, first: usize, last: usize) -> Vec<u32> {
+        let Ok(m) = Matcher::new(query, flags) else { return Vec::new() };
         let b = &self.doc.buffer;
         let mut out = Vec::new();
         for l in first..=last.min(b.len_lines() - 1) {
             let start = b.line_to_char(l);
-            for m in Self::line_matches(&b.line(l), &q, case) {
-                let (_, c0) = b.char_to_utf16(start + m);
-                let (_, c1) = b.char_to_utf16(start + m + q.len());
+            for (s, e) in Self::line_matches(&m, &b.line(l)) {
+                let (_, c0) = b.char_to_utf16(start + s);
+                let (_, c1) = b.char_to_utf16(start + e);
                 out.extend([l as u32, c0 as u32, c1 as u32]);
             }
         }
         out
     }
 
-    pub fn find_next(&mut self, query: &str, case: bool, forward: bool) -> bool {
+    pub fn find_next(&mut self, query: &str, flags: u8, forward: bool) -> bool {
         self.extra.clear();
-        let matches = self.find_all(query, case, 200_000);
+        let matches = self.find_all(query, flags, 200_000);
         if matches.is_empty() {
             return false;
         }
@@ -1156,31 +1441,34 @@ impl Editor {
     }
 
     // (toplam, seçili eşleşmenin 1 tabanlı sırası ya da 0)
-    pub fn find_status(&self, query: &str, case: bool) -> (usize, usize) {
-        let matches = self.find_all(query, case, 200_000);
+    pub fn find_status(&self, query: &str, flags: u8) -> (usize, usize) {
+        let matches = self.find_all(query, flags, 200_000);
         let r = self.sel.range();
         let current = matches.iter().position(|m| *m == r).map_or(0, |i| i + 1);
         (matches.len(), current)
     }
 
-    pub fn replace_one(&mut self, query: &str, replacement: &str, case: bool) {
-        let q: Vec<char> = query.chars().collect();
+    pub fn replace_one(&mut self, query: &str, replacement: &str, flags: u8) {
+        let Ok(m) = Matcher::new(query, flags) else { return };
         let selected = self.selected_text();
-        if !q.is_empty() && Self::line_matches(&selected, &q, case) == vec![0] && selected.chars().count() == q.len() {
-            self.replace_selection(replacement, EditKind::Other);
+        if !selected.is_empty() && m.matches_exactly(&selected) {
+            let text = m.replacement(&selected, replacement);
+            self.replace_selection(&text, EditKind::Other);
         }
-        self.find_next(query, case, true);
+        self.find_next(query, flags, true);
     }
 
-    pub fn replace_all(&mut self, query: &str, replacement: &str, case: bool) -> usize {
+    pub fn replace_all(&mut self, query: &str, replacement: &str, flags: u8) -> usize {
         self.extra.clear();
-        let matches = self.find_all(query, case, usize::MAX);
+        let Ok(matcher) = Matcher::new(query, flags) else { return 0 };
+        let matches = self.find_all(query, flags, usize::MAX);
         if matches.is_empty() {
             return 0;
         }
         self.history.begin();
         for m in matches.iter().rev() {
-            self.edit_raw(m.clone(), replacement);
+            let text = matcher.replacement(&self.doc.buffer.slice(m.clone()), replacement);
+            self.edit_raw(m.clone(), &text);
         }
         self.sel = Selection::cursor(self.sel.head.min(self.doc.buffer.len_chars()));
         self.history.end(self.snap());
@@ -1362,11 +1650,15 @@ mod tests {
     #[test]
     fn find_replace() {
         let mut e = ed("foo Foo foo");
-        assert!(e.find_next("foo", false, true));
+        assert!(e.find_next("foo", 0, true));
         assert_eq!(e.selection().range(), 0..3);
-        assert_eq!(e.find_status("foo", false), (3, 1));
-        assert_eq!(e.replace_all("foo", "x", true), 2);
+        assert_eq!(e.find_status("foo", 0), (3, 1));
+        assert_eq!(e.replace_all("foo", "x", FIND_CASE), 2);
         assert_eq!(text(&e), "x Foo x");
+        let mut e = ed("a1 b22 çç3");
+        assert_eq!(e.replace_all(r"(\w)(\d+)", "$2$1", FIND_REGEX), 3);
+        assert_eq!(text(&e), "1a 22b ç3ç");
+        assert!(Editor::find_error("(", FIND_REGEX).is_some());
     }
 
     #[test]
@@ -1431,6 +1723,98 @@ mod tests {
         e.add_cursor(0, 2);
         e.move_cursor(Motion::DocEnd, false);
         assert_eq!(e.selections().len(), 1);
+    }
+
+    #[test]
+    fn reload_is_undoable_and_clean() {
+        let p = std::env::temp_dir().join(format!("kern-reload-{}.txt", std::process::id()));
+        std::fs::write(&p, "alpha beta gamma").unwrap();
+        let mut e = Editor::new(Document::open(&p).unwrap());
+        e.set_cursor(16);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&p, "alpha BETA gamma!").unwrap();
+        assert!(e.doc.disk_changed());
+        e.reload().unwrap();
+        assert_eq!(text(&e), "alpha BETA gamma!");
+        assert!(!e.is_dirty() && !e.doc.disk_changed());
+        assert!(e.undo());
+        assert_eq!(text(&e), "alpha beta gamma");
+        assert!(e.is_dirty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn views_keep_own_cursors_across_edits() {
+        let mut e = ed("hello world");
+        e.set_cursor(6);
+        let v2 = e.add_view();
+        e.activate_view(v2);
+        assert_eq!(e.selection().head, 6);
+        e.set_cursor(11);
+        e.activate_view(1);
+        e.set_cursor(0);
+        e.insert_text(">> ");
+        e.activate_view(v2);
+        assert_eq!(e.selection().head, 14);
+        e.insert_text("!");
+        e.activate_view(1);
+        assert_eq!(e.selection().head, 3);
+        assert_eq!(text(&e), ">> hello world!");
+        e.remove_view(v2);
+        assert!(e.doc.buffer.marks.is_empty());
+    }
+
+    #[test]
+    fn detects_indentation() {
+        let mut e = ed("a:\n  b\n  c:\n    d\n");
+        e.detect_indent();
+        assert!(e.insert_spaces && e.tab_width == 2);
+        let mut e = ed("a {\n\tb\n\tc\n}\n");
+        e.detect_indent();
+        assert!(!e.insert_spaces);
+        e.set_cursor(2);
+        e.insert_tab();
+        assert_eq!(text(&e), "a \t{\n\tb\n\tc\n}\n");
+    }
+
+    #[test]
+    fn prepare_save_trims_and_appends() {
+        let mut e = ed("a  \nb\t\nc");
+        e.prepare_save(true, true);
+        assert_eq!(text(&e), "a\nb\nc\n");
+        assert!(e.undo());
+        assert_eq!(text(&e), "a  \nb\t\nc");
+        let mut e = ed("x\n");
+        e.prepare_save(true, true);
+        assert!(!e.undo());
+    }
+
+    #[test]
+    fn smart_indent_rules() {
+        let mut e = ed("fn a() {\n    x;\n    ");
+        e.set_cursor(e.doc.buffer.len_chars());
+        e.type_text("}");
+        assert_eq!(text(&e), "fn a() {\n    x;\n}");
+        let mut e = ed_at("a.py", "def f():\n    return 1");
+        e.set_cursor(e.doc.buffer.len_chars());
+        e.insert_newline();
+        assert_eq!(text(&e), "def f():\n    return 1\n");
+        let mut e = ed_at("a.html", "<div></div>");
+        e.set_cursor(5);
+        e.insert_newline();
+        assert_eq!(text(&e), "<div>\n    \n</div>");
+        assert_eq!(e.selection().head, 10);
+    }
+
+    #[test]
+    fn applies_lsp_edits() {
+        let mut e = ed("int  x=1;\nint y;\n");
+        e.set_cursor(14);
+        e.apply_text_edits(&[(0, 3, 0, 5, " ".into()), (0, 6, 0, 7, " = ".into()), (1, 0, 1, 3, "long".into())]);
+        assert_eq!(text(&e), "int x = 1;\nlong y;\n");
+        assert_eq!(e.selection().head, 16);
+        assert!(e.undo());
+        assert_eq!(text(&e), "int  x=1;\nint y;\n");
     }
 
     #[test]

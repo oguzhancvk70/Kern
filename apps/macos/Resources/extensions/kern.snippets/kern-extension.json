@@ -1,0 +1,26 @@
+{
+  "id": "kern.snippets",
+  "name": "Basic Snippets",
+  "version": "1.0.0",
+  "description": "Common snippets for Rust, Swift, Python and JavaScript.",
+  "contributes": {
+    "snippets": {
+      "Rust": [
+        { "prefix": "fnmain", "body": "fn main() {\n    $0\n}", "description": "main function" },
+        { "prefix": "test", "body": "#[test]\nfn ${1:name}() {\n    $0\n}", "description": "test function" },
+        { "prefix": "impl", "body": "impl ${1:Type} {\n    $0\n}", "description": "impl block" }
+      ],
+      "Swift": [
+        { "prefix": "guardlet", "body": "guard let ${1:value} else { return }", "description": "guard let" },
+        { "prefix": "func", "body": "func ${1:name}() {\n    $0\n}", "description": "function" }
+      ],
+      "Python": [
+        { "prefix": "ifmain", "body": "if __name__ == \"__main__\":\n    ${0:main()}", "description": "main guard" },
+        { "prefix": "def", "body": "def ${1:name}(${2}):\n    ${0:pass}", "description": "function" }
+      ],
+      "JavaScript": [
+        { "prefix": "log", "body": "console.log($0);", "description": "console.log" }
+      ]
+    }
+  }
+}

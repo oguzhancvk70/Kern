@@ -12,6 +12,8 @@ enum MainMenu {
         main.addItem(submenu("Kern", [
             item("About Kern", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
+            item("Settings…", "showSettings:", ","),
+            .separator(),
             item("Hide Kern", #selector(NSApplication.hide(_:)), "h"),
             item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
             item("Show All", #selector(NSApplication.unhideAllApplications(_:))),
@@ -28,6 +30,9 @@ enum MainMenu {
             .separator(),
             item("Save", "saveDocument:", "s"),
             item("Save As…", "saveDocumentAs:", "s", [.command, .shift]),
+            .separator(),
+            item("Open User Settings (JSON)", "openSettingsJSON:"),
+            item("Open Keyboard Shortcuts (JSON)", "openKeymapJSON:"),
             item("Save All", "saveAllDocuments:", "s", [.command, .option]),
             .separator(),
             item("Close Editor", "closeEditor:", "w"),
@@ -64,6 +69,10 @@ enum MainMenu {
             item("Move Line Down", "moveLineDown:", down, [.option]),
             item("Delete Line", "deleteLine:", "k", [.command, .shift]),
             .separator(),
+            item("Trigger Suggest", "triggerSuggest:", " ", [.control]),
+            item("Rename Symbol", "renameSymbol:", String(UnicodeScalar(NSF2FunctionKey)!), []),
+            item("Format Document", "formatDocument:", "f", [.option, .shift]),
+            .separator(),
             item("Indent Line", "indentLines:", "]"),
             item("Outdent Line", "outdentLines:", "["),
         ]))
@@ -76,6 +85,14 @@ enum MainMenu {
             item("Toggle Sidebar", "toggleSidebarVisibility:", "b"),
             item("Terminal", "toggleTerminal:", "`", [.control]),
             .separator(),
+            item("Split Editor", "splitEditor:", "\\"),
+            item("Word Wrap", "toggleWordWrap:", "z", [.option]),
+            item("Fold", "foldRegion:", "[", [.command, .option]),
+            item("Unfold", "unfoldRegion:", "]", [.command, .option]),
+            item("Fold All", "foldAllRegions:"),
+            item("Unfold All", "unfoldAllRegions:"),
+            item("Focus Next Editor Group", "focusNextGroup:", "k", [.command, .option]),
+            .separator(),
             item("Zoom In", "zoomIn:", "="),
             item("Zoom Out", "zoomOut:", "-"),
             item("Reset Zoom", "resetZoom:", "0"),
@@ -86,13 +103,42 @@ enum MainMenu {
         main.addItem(submenu("Go", [
             item("Go to File…", "quickOpen:", "p"),
             item("Go to Line…", "goToLine:", "g", [.control]),
+            item("Go to Symbol in Editor…", "goToSymbol:", "o", [.command, .shift]),
+            item("Go to Definition", "goToDefinition:", String(UnicodeScalar(NSF12FunctionKey)!), []),
+            item("Go to References", "goToReferences:", String(UnicodeScalar(NSF12FunctionKey)!), [.shift]),
+            item("Problems", "showProblems:", "m", [.command, .shift]),
+            item("Install Language Server…", "installLanguageServer:"),
             .separator(),
             item("Next Editor", "nextEditor:", right, [.command, .option]),
             item("Previous Editor", "previousEditor:", left, [.command, .option]),
         ]))
 
+        main.addItem(submenu("AI", [
+            item("Open AI Panel", "showAI:", "i", [.command, .shift]),
+            item("Agent Mode", "showAgent:"),
+            item("Set API Key…", "setAPIKey:"),
+            item("Toggle Inline Completions", "toggleInlineCompletion:"),
+        ]))
+
+        var ext: [NSMenuItem] = [
+            item("Show Installed Extensions", "showExtensions:"),
+            item("Install Extension from Folder…", "installExtension:"),
+            item("Uninstall Extension…", "uninstallExtension:"),
+            item("Reload Extensions", "reloadExtensions:"),
+        ]
+        let cmds = Extensions.shared.commands
+        if !cmds.isEmpty { ext.append(.separator()) }
+        for c in cmds {
+            let i = item(c.title, "runExtensionCommand:")
+            i.representedObject = "ext:\(c.ext):\(c.id)"
+            ext.append(i)
+        }
+        main.addItem(submenu("Extensions", ext))
+
         main.addItem(submenu("Terminal", [
             item("New Terminal", "newTerminal:", "`", [.control, .shift]),
+            item("Split Terminal", "splitTerminal:"),
+            item("Kill Terminal", "killTerminal:"),
             item("Toggle Terminal", "toggleTerminal:"),
             .separator(),
             item("Clear", "clearTerminal:", "k"),

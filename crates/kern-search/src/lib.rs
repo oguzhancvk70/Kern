@@ -1,9 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ignore::WalkBuilder;
+use kern_text::Matcher;
+pub use kern_text::{FIND_CASE, FIND_REGEX, FIND_WORD};
 
 const MAX_FILES: usize = 200_000;
-const MAX_SEARCH_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SEARCH_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct Hit {
     pub path: String,
@@ -11,6 +15,8 @@ pub struct Hit {
     pub col16: usize,
     pub len16: usize,
     pub text: String,
+    // text içinde eşleşmenin başladığı UTF-16 sütunu
+    pub preview_col16: usize,
 }
 
 pub struct Workspace {
@@ -66,36 +72,110 @@ impl Workspace {
         scored.into_iter().take(limit).map(|(_, f)| f).collect()
     }
 
-    pub fn search(&self, query: &str, case: bool, limit: usize) -> Vec<Hit> {
-        let mut hits = Vec::new();
-        if query.is_empty() {
-            return hits;
-        }
-        let needle = if case { query.to_string() } else { query.to_ascii_lowercase() };
-        for rel in &self.files {
-            let path = self.root.join(rel);
-            if std::fs::metadata(&path).map_or(true, |m| m.len() > MAX_SEARCH_BYTES) {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            if bytes[..bytes.len().min(8000)].contains(&0) {
-                continue;
-            }
-            let text = String::from_utf8_lossy(&bytes);
-            for (i, line) in text.lines().enumerate() {
-                let hay = if case { line.to_string() } else { line.to_ascii_lowercase() };
-                let Some(pos) = hay.find(&needle) else { continue };
-                let col16 = line[..pos].encode_utf16().count();
-                let len16 = line[pos..pos + needle.len()].encode_utf16().count();
-                let trimmed: String = line.chars().take(240).collect();
-                hits.push(Hit { path: rel.clone(), line: i, col16, len16, text: trimmed });
-                if hits.len() >= limit {
-                    return hits;
+    // arka planda, çok iş parçacıklı arama; sonuçlar geldikçe `take` ile alınır
+    pub fn search_stream(&self, query: &str, flags: u8, limit: usize) -> Result<SearchJob, String> {
+        let matcher = Arc::new(Matcher::new(query, flags)?);
+        let job = SearchJob::default();
+        let files = Arc::new(self.files.clone());
+        let root = Arc::new(self.root.clone());
+        let next = Arc::new(AtomicUsize::new(0));
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
+        let running = Arc::new(AtomicUsize::new(threads));
+        for _ in 0..threads {
+            let (files, root, next, matcher, running) = (files.clone(), root.clone(), next.clone(), matcher.clone(), running.clone());
+            let (hits, count, cancel, done) = (job.hits.clone(), job.count.clone(), job.cancel.clone(), job.done.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= files.len() || cancel.load(Ordering::Relaxed) || count.load(Ordering::Relaxed) >= limit {
+                        break;
+                    }
+                    let found = search_file(&root.join(&files[i]), &files[i], &matcher);
+                    if !found.is_empty() {
+                        let n = count.fetch_add(found.len(), Ordering::Relaxed);
+                        let take = found.len().min(limit.saturating_sub(n));
+                        hits.lock().unwrap().extend(found.into_iter().take(take));
+                    }
                 }
+                if running.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    done.store(true, Ordering::Release);
+                }
+            });
+        }
+        Ok(job)
+    }
+
+    // eşzamanlı sarmalayıcı (testler ve CLI için)
+    pub fn search(&self, query: &str, flags: u8, limit: usize) -> Vec<Hit> {
+        let Ok(job) = self.search_stream(query, flags, limit) else { return Vec::new() };
+        let mut out = Vec::new();
+        while !job.is_done() {
+            out.extend(job.take());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        out.extend(job.take());
+        out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+        out
+    }
+}
+
+#[derive(Default)]
+pub struct SearchJob {
+    hits: Arc<Mutex<Vec<Hit>>>,
+    count: Arc<AtomicUsize>,
+    cancel: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+}
+
+impl SearchJob {
+    pub fn take(&self) -> Vec<Hit> {
+        std::mem::take(&mut *self.hits.lock().unwrap())
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn total(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for SearchJob {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+fn search_file(path: &Path, rel: &str, m: &Matcher) -> Vec<Hit> {
+    let mut out = Vec::new();
+    if std::fs::metadata(path).map_or(true, |md| md.len() > MAX_SEARCH_BYTES) {
+        return out;
+    }
+    let Ok(bytes) = std::fs::read(path) else { return out };
+    if bytes[..bytes.len().min(8000)].contains(&0) {
+        return out;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    for (i, line) in text.lines().enumerate() {
+        for r in m.find(line) {
+            let col16 = line[..r.start].encode_utf16().count();
+            let len16 = line[r.clone()].encode_utf16().count();
+            // uzun satırda eşleşme civarını göster
+            let from = line[..r.start].char_indices().rev().nth(60).map_or(0, |(b, _)| b);
+            let shown: String = line[from..].chars().take(240).collect();
+            let shift = line[from..r.start].encode_utf16().count();
+            out.push(Hit { path: rel.to_string(), line: i, col16, len16, text: shown, preview_col16: shift });
+            if out.len() >= 1000 {
+                return out;
             }
         }
-        hits
     }
+    out
 }
 
 fn fuzzy_score(path: &str, q: &[char]) -> Option<i64> {
@@ -141,7 +221,14 @@ mod tests {
         let w = Workspace::open(env!("CARGO_MANIFEST_DIR"));
         assert!(w.files().iter().any(|f| f == "src/lib.rs"));
         assert_eq!(w.quick_open("lib", 1), vec!["src/lib.rs"]);
-        let hits = w.search("fn fuzzy_score", true, 10);
+        let hits = w.search("fn fuzzy_score", FIND_CASE, 10);
         assert!(hits.iter().any(|h| h.path == "src/lib.rs" && h.col16 == 0));
+        let hits = w.search(r"fn \w+_score\(", FIND_REGEX | FIND_CASE, 10);
+        assert!(hits.iter().any(|h| h.text.starts_with("fn fuzzy_score(")));
+        let job = w.search_stream("the", 0, 3).unwrap();
+        while !job.is_done() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(job.take().len() <= 3);
     }
 }

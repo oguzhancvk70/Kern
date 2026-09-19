@@ -4,11 +4,14 @@ import MetalKit
 final class TerminalView: MTKView, MTKViewDelegate {
     var onExit: (() -> Void)?
     var onTitle: ((String) -> Void)?
+    var onFocus: (() -> Void)?
+    var onOpenPath: ((URL, Int?, Int?) -> Void)?
 
     private(set) var terminal: KernTerminal?
     private let renderer: Renderer
     private let cwd: String
-    private let pointSize: CGFloat = 12
+    private let environment: [String: String]
+    private var pointSize: CGFloat { CGFloat(max(6, Settings.shared.int("terminal.fontSize"))) }
     private var font: CTFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular) as CTFont
     private var boldFont: CTFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold) as CTFont
     private var cellW: CGFloat = 1
@@ -25,17 +28,35 @@ final class TerminalView: MTKView, MTKViewDelegate {
 
     private var scale: CGFloat { window?.backingScaleFactor ?? 2 }
 
-    init?(cwd: String) {
+    init?(cwd: String, environment: [String: String] = [:]) {
         guard let device = MTLCreateSystemDefaultDevice(),
               let renderer = Renderer(device: device, pixelFormat: .bgra8Unorm) else { return nil }
         self.renderer = renderer
         self.cwd = cwd
+        self.environment = environment
         super.init(frame: .zero, device: device)
         colorPixelFormat = .bgra8Unorm
         framebufferOnly = true
         isPaused = true
         enableSetNeedsDisplay = true
         delegate = self
+        NotificationCenter.default.addObserver(forName: Settings.changed, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.window != nil else { return }
+            self.configureFont()
+            self.needsDisplay = true
+        }
+    }
+
+    // OSC 7 ile bilinen dizin, yoksa başlangıç dizini
+    var currentDirectory: String {
+        let c = terminal?.cwd().toString() ?? ""
+        return c.isEmpty ? cwd : c
+    }
+
+    var shortTitle: String {
+        let t = lastTitle.trimmingCharacters(in: .whitespaces)
+        if t.isEmpty { return (ProcessInfo.processInfo.environment["SHELL"] as NSString?)?.lastPathComponent ?? "zsh" }
+        return String(t.prefix(40))
     }
 
     required init(coder: NSCoder) { fatalError("init(coder:) kullanılmıyor") }
@@ -48,6 +69,7 @@ final class TerminalView: MTKView, MTKViewDelegate {
     override func becomeFirstResponder() -> Bool {
         focused = true
         needsDisplay = true
+        onFocus?()
         return true
     }
 
@@ -99,7 +121,8 @@ final class TerminalView: MTKView, MTKViewDelegate {
         if let terminal {
             terminal.resize(UInt(cols), UInt(rows), cw, ch)
         } else {
-            terminal = spawn_terminal(cwd, UInt(cols), UInt(rows), cw, ch)
+            let env = environment.map { "\($0)=\($1)" }.joined(separator: "\n")
+            terminal = spawn_terminal(cwd, UInt(cols), UInt(rows), cw, ch, UInt(max(100, Settings.shared.int("terminal.scrollback"))), env)
         }
         needsDisplay = true
     }
@@ -148,8 +171,15 @@ final class TerminalView: MTKView, MTKViewDelegate {
         return g
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
     func draw(in view: MTKView) {
-        let background: UInt32 = 0x181818
+        let light = effectiveAppearance.isLight
+        terminal?.set_light(light)
+        let background: UInt32 = terminal?.background() ?? (light ? 0xF8F8F8 : 0x181818)
         guard let terminal else {
             return renderer.render([], in: self, clear: color(background))
         }
@@ -162,7 +192,7 @@ final class TerminalView: MTKView, MTKViewDelegate {
         var back: [Instance] = []
         var text: [Instance] = []
         var front: [Instance] = []
-        let selection = color(0x264F78)
+        let selection = color(light ? 0xADD6FF : 0x264F78)
 
         for row in 0..<rows {
             let y = padY + CGFloat(row) * cellH
@@ -204,10 +234,22 @@ final class TerminalView: MTKView, MTKViewDelegate {
             }
         }
 
+        // komut işaretleri (kabuk entegrasyonu): başarılı mavi, hatalı kırmızı, süren gri
+        let marks = Array(terminal.marks())
+        var m = 0
+        while m + 2 <= marks.count {
+            let row = Int(marks[m]), code = marks[m + 1]
+            if row < rows {
+                let tint: UInt32 = code < 0 ? 0x808080 : (code == 0 ? 0x3794FF : 0xF14C4C)
+                front.append(.rect(2 * scale, padY + CGFloat(row) * cellH + cellH * 0.2, 3 * scale, cellH * 0.6, color(tint)))
+            }
+            m += 2
+        }
+
         let c = n * 4
         if snap[c + 2] == 1 {
             let x = padX + CGFloat(snap[c + 1]) * cellW, y = padY + CGFloat(snap[c]) * cellH
-            let cursor = color(0xAEAFAD)
+            let cursor = color(light ? 0x000000 : 0xAEAFAD)
             let t = max(1, scale.rounded())
             if focused && snap[c + 3] == 1 {
                 back.append(.rect(x, y, cellW, cellH, cursor))
@@ -238,6 +280,13 @@ final class TerminalView: MTKView, MTKViewDelegate {
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags
         if flags.contains(.command) { return super.keyDown(with: event) }
+        // Option = Meta: ESC öneki + değiştiricisiz karakter
+        if flags.contains(.option), Settings.shared.bool("terminal.optionAsMeta"),
+           let raw = event.charactersIgnoringModifiers, let sc = raw.unicodeScalars.first, sc.value < 0xF700 {
+            if sc.value == 0x7F { return send("\u{1b}\u{7f}") }
+            let base = flags.contains(.control) ? (event.characters ?? raw) : raw
+            return send("\u{1b}" + base)
+        }
         let app = terminal?.app_cursor() ?? false
         let arrow = { (c: String) in app ? "\u{1b}O\(c)" : "\u{1b}[\(c)" }
         guard let chars = event.charactersIgnoringModifiers, let scalar = chars.unicodeScalars.first else { return }
@@ -289,6 +338,7 @@ final class TerminalView: MTKView, MTKViewDelegate {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let c = cell(at: event)
+        if event.modifierFlags.contains(.command), openLink(row: c.row, col: c.col) { return }
         switch event.clickCount {
         case 2: terminal?.select_start(UInt(c.row), UInt(c.col), c.right, 1)
         case 3...: terminal?.select_start(UInt(c.row), UInt(c.col), c.right, 2)
@@ -323,4 +373,42 @@ final class TerminalView: MTKView, MTKViewDelegate {
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .iBeam)
     }
+
+    // ⌘-tık: URL ya da dosya yolu (yol:satır:sütun)
+    private static let linkRegex = try! NSRegularExpression(
+        pattern: #"(https?://[^\s'"<>()]+)|((?:~|\.{1,2}|/)?[\w.@+-]*(?:/[\w.@+-]+)*\.?[\w-]*)(?::(\d+))?(?::(\d+))?"#)
+
+    @discardableResult
+    func openLink(row: Int, col: Int) -> Bool {
+        guard let t = terminal else { return false }
+        let text = t.logical_line(UInt(row)).toString()
+        guard !text.isEmpty else { return false }
+        let ns = text as NSString
+        // sarılmış satırın başlangıcı + sütun (karakter ofseti UTF-16'ya yaklaşık eşlenir)
+        let prefix = String(text.prefix(Int(t.logical_offset(UInt(row)))))
+        let target = min((prefix as NSString).length + col, ns.length - 1)
+        for m in Self.linkRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            guard NSLocationInRange(target, m.range), m.range.length > 1 else { continue }
+            if m.range(at: 1).location != NSNotFound, let url = URL(string: ns.substring(with: m.range(at: 1))) {
+                NSWorkspace.shared.open(url)
+                return true
+            }
+            guard m.range(at: 2).location != NSNotFound else { continue }
+            var path = ns.substring(with: m.range(at: 2))
+            if path.hasPrefix("~") { path = NSHomeDirectory() + path.dropFirst() }
+            let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : URL(fileURLWithPath: currentDirectory).appendingPathComponent(path)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+            let line = m.range(at: 3).location != NSNotFound ? Int(ns.substring(with: m.range(at: 3))) : nil
+            let c = m.range(at: 4).location != NSNotFound ? Int(ns.substring(with: m.range(at: 4))) : nil
+            onOpenPath?(url.standardizedFileURL, line, c)
+            return true
+        }
+        return false
+    }
+
+    // terminal odaktayken ⌘\ terminali böler, ⌥⌘←/→ terminaller arasında gezer
+    @objc func splitEditor(_ sender: Any?) { (superview as? TerminalPanel)?.splitTerminal() }
+    @objc func nextEditor(_ sender: Any?) { (superview as? TerminalPanel)?.focusNext(1) }
+    @objc func previousEditor(_ sender: Any?) { (superview as? TerminalPanel)?.focusNext(-1) }
 }

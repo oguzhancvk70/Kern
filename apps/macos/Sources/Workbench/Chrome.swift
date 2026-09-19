@@ -3,7 +3,19 @@ import AppKit
 // macOS 14+: görünümler varsayılan olarak kırpmıyor, dirtyRect sınırı aşabiliyor
 class FlippedView: NSView {
     var background: NSColor? { didSet { needsDisplay = true } }
+    var border: NSColor? { didSet { applyBorder() } }
     override var isFlipped: Bool { true }
+
+    private func applyBorder() {
+        guard let border else { return }
+        effectiveAppearance.performAsCurrentDrawingAppearance { self.layer?.borderColor = border.cgColor }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyBorder()
+        needsDisplay = true
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -57,7 +69,7 @@ final class InputBox: FlippedView {
         wantsLayer = true
         layer?.cornerRadius = 3
         layer?.borderWidth = 1
-        layer?.borderColor = Palette.inputBorder.cgColor
+        border = Palette.inputBorder
         field.isBezeled = false
         field.drawsBackground = false
         field.focusRingType = .none
@@ -79,7 +91,7 @@ final class InputBox: FlippedView {
     }
 
     func setFocused(_ on: Bool) {
-        layer?.borderColor = (on ? Palette.accent : Palette.inputBorder).cgColor
+        border = on ? Palette.accent : Palette.inputBorder
     }
 }
 
@@ -87,7 +99,7 @@ final class ActivityBar: FlippedView {
     var onSelect: ((Int) -> Void)?
     var selected: Int? { didSet { refresh() } }
     private var buttons: [NSButton] = []
-    private let items = [("doc.on.doc", "Explorer (⇧⌘E)"), ("magnifyingglass", "Search (⇧⌘F)")]
+    private let items = [("doc.on.doc", "Explorer (⇧⌘E)"), ("magnifyingglass", "Search (⇧⌘F)"), ("sparkles", "AI (⇧⌘I)")]
 
     override init(frame: NSRect) {
         super.init(frame: frame)

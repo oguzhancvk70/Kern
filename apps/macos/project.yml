@@ -17,6 +17,8 @@ targets:
         createIntermediateGroups: true
       - path: Resources/FileIcons
         type: folder
+      - path: Resources/extensions
+        type: folder
       - Resources/AppIcon.icns
     info:
       path: Info.plist
@@ -27,6 +29,9 @@ targets:
         CFBundleIconFile: AppIcon
         NSPrincipalClass: NSApplication
         NSHighResolutionCapable: true
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.kern.open
+            CFBundleURLSchemes: [kern]
         CFBundleDocumentTypes:
           - CFBundleTypeName: Text
             CFBundleTypeRole: Editor
@@ -46,4 +51,11 @@ targets:
     preBuildScripts:
       - name: Rust kern-ffi
         script: '"$PROJECT_DIR/../../scripts/build-rust.sh"'
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: Bundle kern CLI
+        script: |
+          P=debug; [ "$CONFIGURATION" = "Release" ] && P=release
+          mkdir -p "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Resources/bin"
+          cp "$PROJECT_DIR/../../target.nosync/universal/$P/kern" "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Resources/bin/kern"
         basedOnDependencyAnalysis: false

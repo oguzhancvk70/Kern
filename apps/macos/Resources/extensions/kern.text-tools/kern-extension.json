@@ -1,0 +1,15 @@
+{
+  "id": "kern.text-tools",
+  "name": "Text Tools",
+  "version": "1.0.0",
+  "description": "Uppercase / lowercase the selection (ASCII).",
+  "main": "text-tools.wat",
+  "permissions": ["editor:read", "editor:write"],
+  "contributes": {
+    "commands": [
+      { "id": "upper", "title": "Transform to Uppercase" },
+      { "id": "lower", "title": "Transform to Lowercase" }
+    ],
+    "keybindings": [{ "key": "cmd+alt+u", "command": "upper" }]
+  }
+}

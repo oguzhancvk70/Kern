@@ -12,6 +12,8 @@ crate-type = ["staticlib"]
 kern-core.workspace = true
 kern-search = { version = "0.1.0", path = "../kern-search" }
 kern-term = { version = "0.1.0", path = "../kern-term" }
+kern-lsp = { version = "0.1.0", path = "../kern-lsp" }
+kern-ext = { version = "0.1.0", path = "../kern-ext" }
 swift-bridge = "0.1.59"
 
 [build-dependencies]

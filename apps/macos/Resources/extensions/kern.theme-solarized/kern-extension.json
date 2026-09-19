@@ -1,0 +1,26 @@
+{
+  "id": "kern.theme-solarized",
+  "name": "Solarized Themes",
+  "version": "1.0.0",
+  "description": "Solarized Dark and Solarized Light color themes.",
+  "contributes": {
+    "themes": [
+      {
+        "name": "Solarized Dark", "type": "dark",
+        "colors": { "background": "#002B36", "text": "#93A1A1", "lineNumber": "#586E75", "activeLineNumber": "#93A1A1",
+                    "selection": "#274642", "cursor": "#D30102", "currentLineBorder": "#073642", "indentGuide": "#0E4A57", "findMatch": "#B5890066" },
+        "tokens": { "keyword": "#859900", "control": "#859900", "string": "#2AA198", "comment": "#586E75", "function": "#268BD2",
+                    "type": "#B58900", "variable": "#93A1A1", "number": "#D33682", "constant": "#CB4B16", "property": "#268BD2",
+                    "operator": "#859900", "punctuation": "#93A1A1", "attribute": "#6C71C4", "tag": "#268BD2", "escape": "#DC322F", "module": "#B58900" }
+      },
+      {
+        "name": "Solarized Light", "type": "light",
+        "colors": { "background": "#FDF6E3", "text": "#586E75", "lineNumber": "#93A1A1", "activeLineNumber": "#586E75",
+                    "selection": "#EEE8D5", "cursor": "#657B83", "currentLineBorder": "#EEE8D5", "indentGuide": "#E4DDC8", "findMatch": "#B5890055" },
+        "tokens": { "keyword": "#859900", "control": "#859900", "string": "#2AA198", "comment": "#93A1A1", "function": "#268BD2",
+                    "type": "#B58900", "variable": "#586E75", "number": "#D33682", "constant": "#CB4B16", "property": "#268BD2",
+                    "operator": "#859900", "punctuation": "#586E75", "attribute": "#6C71C4", "tag": "#268BD2", "escape": "#DC322F", "module": "#B58900" }
+      }
+    ]
+  }
+}

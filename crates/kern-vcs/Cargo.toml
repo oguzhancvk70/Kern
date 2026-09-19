@@ -1,0 +1,8 @@
+[package]
+name = "kern-vcs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+similar = "3.2.0"

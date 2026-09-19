@@ -49,7 +49,9 @@ final class TextLayout {
     func configure(pointSize: CGFloat, scale: CGFloat) {
         cache.removeAll()
         atlas.resetAll()
-        font = NSFont.monospacedSystemFont(ofSize: pointSize * scale, weight: .regular) as CTFont
+        let family = Settings.shared.string("editor.fontFamily")
+        font = (family.isEmpty ? nil : NSFont(name: family, size: pointSize * scale))
+            .map { $0 as CTFont } ?? NSFont.monospacedSystemFont(ofSize: pointSize * scale, weight: .regular) as CTFont
         let ascent = CTFontGetAscent(font), descent = CTFontGetDescent(font), leading = CTFontGetLeading(font)
         lineHeight = ceil((ascent + descent + leading) * 1.4)
         baseline = floor((lineHeight - ascent - descent) / 2 + ascent)

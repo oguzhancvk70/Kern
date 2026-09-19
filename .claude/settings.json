@@ -50,7 +50,27 @@
       "Bash(git init *)",
       "Bash(git remote *)",
       "Bash(git add *)",
-      "Bash(git ls-remote *)"
+      "Bash(git ls-remote *)",
+      "Bash(git commit -q -m 'Initial commit *)",
+      "Bash(git push *)",
+      "Bash(/private/tmp/claude-501/-Users-base-Library-Mobile-Documents-com-apple-CloudDocs-Desktop-Projects-Kern/ba5a0279-0acf-41a0-b73f-ba39b37e4d78/scratchpad/check.sh gen *)",
+      "Bash(sed -i '' 's/if tabs.allSatisfy\\(\\\\\\\\.isPristine\\) { restoreSession\\(\\) }/if allTabs.allSatisfy\\(\\\\\\\\.isPristine\\) { restoreSession\\(\\) }/' apps/macos/Sources/Workbench/WorkbenchWindowController.swift)",
+      "Bash(/private/tmp/claude-501/-Users-base-Library-Mobile-Documents-com-apple-CloudDocs-Desktop-Projects-Kern/ba5a0279-0acf-41a0-b73f-ba39b37e4d78/scratchpad/check.sh)",
+      "Bash(pkill -x Kern)",
+      "Bash(open -n /tmp/claude-501/kern-dd/Build/Products/Debug/Kern.app --args)",
+      "Bash(osascript -e 'tell application \"System Events\" to get name of every process whose name is \"Kern\"')",
+      "Bash(screencapture -x /private/tmp/claude-501/-Users-base-Library-Mobile-Documents-com-apple-CloudDocs-Desktop-Projects-Kern/ba5a0279-0acf-41a0-b73f-ba39b37e4d78/scratchpad/shot.png)",
+      "Bash(osascript -e 'tell application \"Kern\" to activate' -e 'delay 0.5' -e 'tell application \"System Events\" to keystroke \"p\" using command down' -e 'delay 0.5' -e 'tell application \"System Events\" to keystroke \"lib.rs\"' -e 'delay 0.8' -e 'tell application \"System Events\" to key code 36' -e 'delay 0.8' -e 'tell application \"System Events\" to keystroke \"\\\\\\\\\" using command down' -e 'delay 1')",
+      "Bash(sips -Z 1400 /private/tmp/claude-501/-Users-base-Library-Mobile-Documents-com-apple-CloudDocs-Desktop-Projects-Kern/ba5a0279-0acf-41a0-b73f-ba39b37e4d78/scratchpad/shot.png --out /private/tmp/claude-501/-Users-base-Library-Mobile-Documents-com-apple-CloudDocs-Desktop-Projects-Kern/ba5a0279-0acf-41a0-b73f-ba39b37e4d78/scratchpad/shot_s.png)",
+      "Read(//private/tmp/claude-501/kern-dd/Build/Products/Debug/Kern.app/Contents/Resources/bin/**)",
+      "Bash(/tmp/claude-501/kern-dd/Build/Products/Debug/Kern.app/Contents/Resources/bin/kern --version)",
+      "Bash(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' /tmp/claude-501/kern-dd/Build/Products/Debug/Kern.app/Contents/Info.plist)",
+      "Bash(rust-analyzer --version)",
+      "Bash(clangd --version)",
+      "Bash(sourcekit-lsp --help)",
+      "Bash(sed -i '' 's/use std::io::{self, BufRead, BufReader, Read, Write};/use std::io::{self, BufRead, BufReader, Write};/' crates/kern-lsp/src/lib.rs)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)"
     ],
     "additionalDirectories": [
       "/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern"
