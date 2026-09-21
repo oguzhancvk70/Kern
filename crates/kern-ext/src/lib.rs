@@ -183,7 +183,11 @@ impl Registry {
             let ptr = alloc.call(&mut store, bytes.len() as i32).map_err(|e| e.to_string())?;
             memory.write(&mut store, ptr as usize, bytes).map_err(|e| e.to_string())?;
             run.call(&mut store, (ptr, bytes.len() as i32)).map_err(|e| {
-                if store.get_fuel().map_or(false, |f| f == 0) { "extension ran too long and was stopped".to_string() } else { format!("{e:#}") }
+                if store.get_fuel().map_or(false, |f| f == 0) {
+                    "extension ran too long and was stopped".to_string()
+                } else {
+                    format!("{e:#}")
+                }
             })
         })();
         let s = store.data();

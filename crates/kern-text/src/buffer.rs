@@ -142,9 +142,7 @@ impl Buffer {
         }
         let end = b + text.len();
         let new_end = self.point(end);
-        self.edits.push(ByteEdit {
-            start_byte: b, old_end_byte: b, new_end_byte: end, start, old_end: start, new_end,
-        });
+        self.edits.push(ByteEdit { start_byte: b, old_end_byte: b, new_end_byte: end, start, old_end: start, new_end });
     }
 
     pub fn remove(&mut self, range: Range<usize>) {
@@ -164,9 +162,7 @@ impl Buffer {
         }
         self.rope.remove(range);
         self.version += 1;
-        self.edits.push(ByteEdit {
-            start_byte: s, old_end_byte: e, new_end_byte: s, start, old_end, new_end: start,
-        });
+        self.edits.push(ByteEdit { start_byte: s, old_end_byte: e, new_end_byte: s, start, old_end, new_end: start });
     }
 
     // UI/LSP koordinatı: satır + UTF-16 sütun

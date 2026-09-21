@@ -55,6 +55,8 @@ func iconButton(_ name: String, tooltip: String, size: CGFloat = 14, target: Any
     button.imagePosition = .imageOnly
     button.toolTip = tooltip
     button.setButtonType(.momentaryChange)
+    // yalnız simgeli düğmelerin VoiceOver adı olmaz
+    button.setAccessibilityLabel(tooltip)
     return button
 }
 
@@ -65,6 +67,7 @@ final class InputBox: FlippedView {
 
     init(placeholder: String) {
         super.init(frame: .zero)
+        field.setAccessibilityLabel(placeholder)
         background = Palette.input
         wantsLayer = true
         layer?.cornerRadius = 3
@@ -95,16 +98,17 @@ final class InputBox: FlippedView {
     }
 }
 
-final class ActivityBar: FlippedView {
+final class ActivityBar: FlippedView, NSAccessibilityGroup {
     var onSelect: ((Int) -> Void)?
     var selected: Int? { didSet { refresh() } }
     private var buttons: [NSButton] = []
     private let items = [("doc.on.doc", "Explorer (⇧⌘E)"), ("magnifyingglass", "Search (⇧⌘F)"), ("sparkles", "AI (⇧⌘I)"),
-                                 ("arrow.triangle.branch", "Source Control (⌃⇧G)")]
+                                 ("arrow.triangle.branch", "Source Control (⌃⇧G)"), ("play.circle", "Run and Debug (⇧⌘D)")]
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         background = Palette.chrome
+        setAccessibilityLabel("Activity Bar")
         for (i, item) in items.enumerated() {
             let b = iconButton(item.0, tooltip: item.1, size: 20, target: self, action: #selector(tap(_:)))
             b.tag = i
@@ -155,6 +159,11 @@ final class SplitHandle: NSView {
 final class StatusBarView: FlippedView {
     var left: [String] = [] { didSet { needsDisplay = true } }
     var right: [String] = [] { didSet { needsDisplay = true } }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
+    override func accessibilityLabel() -> String? { "Status Bar" }
+    override func accessibilityValue() -> Any? { (left + right).joined(separator: ", ") }
     private let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Palette.text]
 
     override init(frame: NSRect) {
@@ -188,6 +197,11 @@ final class StatusBarView: FlippedView {
 
 final class BreadcrumbsView: FlippedView {
     var parts: [String] = [] { didSet { needsDisplay = true } }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
+    override func accessibilityLabel() -> String? { "Breadcrumbs" }
+    override func accessibilityValue() -> Any? { parts.joined(separator: " › ") }
 
     override init(frame: NSRect) {
         super.init(frame: frame)

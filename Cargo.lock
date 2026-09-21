@@ -649,6 +649,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kern-dap"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "kern-ext"
 version = "0.1.0"
 dependencies = [
@@ -661,6 +668,7 @@ name = "kern-ffi"
 version = "0.1.0"
 dependencies = [
  "kern-core",
+ "kern-dap",
  "kern-ext",
  "kern-lsp",
  "kern-search",

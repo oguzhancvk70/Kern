@@ -127,6 +127,10 @@ final class TerminalView: MTKView, MTKViewDelegate {
         needsDisplay = true
     }
 
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
+    override func accessibilityLabel() -> String? { lastTitle.isEmpty ? "Terminal" : "Terminal: \(lastTitle)" }
+
     private func poll() {
         guard let terminal else { return }
         if terminal.take_dirty() {

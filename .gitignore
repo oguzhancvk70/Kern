@@ -17,3 +17,6 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# dağıtım çıktısı
+dist/

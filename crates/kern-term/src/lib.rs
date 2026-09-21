@@ -12,9 +12,9 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
+pub use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
-pub use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Pty, Shell};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
@@ -32,17 +32,23 @@ pub struct TermPalette {
 // VS Code Dark Modern / Light Modern terminal paletleri
 pub const DARK: TermPalette = TermPalette {
     ansi: [
-        0x000000, 0xCD3131, 0x0DBC79, 0xE5E510, 0x2472C8, 0xBC3FBC, 0x11A8CD, 0xE5E5E5,
-        0x666666, 0xF14C4C, 0x23D18B, 0xF5F543, 0x3B8EEA, 0xD670D6, 0x29B8DB, 0xE5E5E5,
+        0x000000, 0xCD3131, 0x0DBC79, 0xE5E510, 0x2472C8, 0xBC3FBC, 0x11A8CD, 0xE5E5E5, 0x666666, 0xF14C4C, 0x23D18B, 0xF5F543, 0x3B8EEA,
+        0xD670D6, 0x29B8DB, 0xE5E5E5,
     ],
-    fg: 0xCCCCCC, bg: 0x181818, dim: 0x999999, cursor: 0xAEAFAD,
+    fg: 0xCCCCCC,
+    bg: 0x181818,
+    dim: 0x999999,
+    cursor: 0xAEAFAD,
 };
 pub const LIGHT: TermPalette = TermPalette {
     ansi: [
-        0x000000, 0xCD3131, 0x00BC00, 0x949800, 0x0451A5, 0xBC05BC, 0x0598BC, 0x555555,
-        0x666666, 0xCD3131, 0x14CE14, 0xB5BA00, 0x0451A5, 0xBC05BC, 0x0598BC, 0xA5A5A5,
+        0x000000, 0xCD3131, 0x00BC00, 0x949800, 0x0451A5, 0xBC05BC, 0x0598BC, 0x555555, 0x666666, 0xCD3131, 0x14CE14, 0xB5BA00, 0x0451A5,
+        0xBC05BC, 0x0598BC, 0xA5A5A5,
     ],
-    fg: 0x3B3B3B, bg: 0xF8F8F8, dim: 0x777777, cursor: 0x000000,
+    fg: 0x3B3B3B,
+    bg: 0xF8F8F8,
+    dim: 0x777777,
+    cursor: 0x000000,
 };
 
 // hücre bayrakları (Swift ile ortak)
@@ -240,7 +246,12 @@ impl Terminal {
     }
 
     pub fn spawn_with(
-        cwd: Option<PathBuf>, cols: usize, lines: usize, cell_w: u16, cell_h: u16, scrollback: usize,
+        cwd: Option<PathBuf>,
+        cols: usize,
+        lines: usize,
+        cell_w: u16,
+        cell_h: u16,
+        scrollback: usize,
         extra_env: &HashMap<String, String>,
     ) -> io::Result<Self> {
         let (cols, lines) = (cols.max(2), lines.max(1));
@@ -288,7 +299,17 @@ impl Terminal {
             let (term, listener, shell_state, last_exit) = (term.clone(), listener.clone(), shell_state.clone(), last_exit.clone());
             std::thread::spawn(move || read_loop(reader, term, listener, shell_state, last_exit));
         }
-        Ok(Self { term, writer: tx, pty: Mutex::new(pty), listener, shell: shell_state, last_exit, cols, lines, light: AtomicBool::new(false) })
+        Ok(Self {
+            term,
+            writer: tx,
+            pty: Mutex::new(pty),
+            listener,
+            shell: shell_state,
+            last_exit,
+            cols,
+            lines,
+            light: AtomicBool::new(false),
+        })
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -315,9 +336,7 @@ impl Terminal {
             .marks
             .iter()
             .filter(|(_, _, ran)| *ran)
-            .filter_map(|&(abs, exit, _)| {
-                (abs >= top && abs < top + self.lines).then(|| (abs - top, exit.unwrap_or(-1)))
-            })
+            .filter_map(|&(abs, exit, _)| (abs >= top && abs < top + self.lines).then(|| (abs - top, exit.unwrap_or(-1))))
             .collect()
     }
 
@@ -518,14 +537,17 @@ impl Terminal {
         }
         let c = content.cursor;
         let row = c.point.line.0 + offset;
-        let cursor = (c.shape != CursorShape::Hidden && row >= 0 && (row as usize) < lines)
-            .then(|| (row as usize, c.point.column.0.min(cols - 1)));
+        let cursor =
+            (c.shape != CursorShape::Hidden && row >= 0 && (row as usize) < lines).then(|| (row as usize, c.point.column.0.min(cols - 1)));
         Snapshot { cells, cursor, cursor_block: c.shape == CursorShape::Block }
     }
 }
 
 fn read_loop(
-    mut reader: File, term: Arc<FairMutex<Term<Listener>>>, listener: Listener, shell: Arc<Mutex<ShellState>>,
+    mut reader: File,
+    term: Arc<FairMutex<Term<Listener>>>,
+    listener: Listener,
+    shell: Arc<Mutex<ShellState>>,
     last_exit: Arc<AtomicI32>,
 ) {
     let mut parser: Processor = Processor::new();

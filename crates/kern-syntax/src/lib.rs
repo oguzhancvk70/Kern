@@ -69,10 +69,7 @@ fn classify(name: &str) -> u8 {
         ("module", MODULE),
         ("namespace", MODULE),
     ];
-    RULES
-        .iter()
-        .find(|(prefix, _)| name == *prefix || name.starts_with(&format!("{prefix}.")))
-        .map_or(NONE, |(_, k)| *k)
+    RULES.iter().find(|(prefix, _)| name == *prefix || name.starts_with(&format!("{prefix}."))).map_or(NONE, |(_, k)| *k)
 }
 
 fn language_for(path: &Path) -> Option<(&'static str, Language, String)> {

@@ -7,7 +7,9 @@ use kern_text::{Edit, EditKind, FIND_CASE, FIND_REGEX, History, Matcher, is_line
 
 use crate::Document;
 
-const SYNTAX_MAX_BYTES: usize = 8 * 1024 * 1024;
+// bu boyuta kadar açılışta hemen parse edilir; üstü arka planda, 50 MB'tan büyüğü hiç
+const SYNTAX_SYNC_BYTES: usize = 2 * 1024 * 1024;
+const SYNTAX_MAX_BYTES: usize = 50 * 1024 * 1024;
 const PAIRS: &[(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('\'', '\''), ('`', '`')];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -70,6 +72,8 @@ pub struct Editor {
     line_ending: &'static str,
     language: &'static str,
     syntax: Option<Syntax>,
+    // arka plandaki ilk parse: (sonuç kanalı, başlatıldığı sürüm)
+    pending_syntax: Option<(std::sync::mpsc::Receiver<Option<Syntax>>, u64)>,
     // aynı belgeyi gösteren görünümler: etkin olan + park edilmiş (seçimleri buffer.marks içinde)
     view: u64,
     next_view: u64,
@@ -92,6 +96,7 @@ impl Editor {
             line_ending,
             language: "Plain Text",
             syntax: None,
+            pending_syntax: None,
             view: 1,
             next_view: 1,
             parked: Vec::new(),
@@ -180,9 +185,7 @@ impl Editor {
         }
         self.view = id;
         let len = self.doc.buffer.len_chars();
-        let mut sels = restored
-            .chunks_exact(2)
-            .map(|p| Selection { anchor: p[0].min(len), head: p[1].min(len) });
+        let mut sels = restored.chunks_exact(2).map(|p| Selection { anchor: p[0].min(len), head: p[1].min(len) });
         self.sel = sels.next().unwrap_or_default();
         self.extra = sels.collect();
         self.goal_col = None;
@@ -210,11 +213,48 @@ impl Editor {
         let Some(path) = self.doc.path.clone() else { return };
         self.language = kern_syntax::language_name(&path);
         self.doc.buffer.take_edits();
-        self.syntax = if self.doc.buffer.len_bytes() <= SYNTAX_MAX_BYTES {
-            Syntax::for_path(&path, self.doc.buffer.rope())
-        } else {
-            None
-        };
+        self.syntax = None;
+        self.pending_syntax = None;
+        let len = self.doc.buffer.len_bytes();
+        if len <= SYNTAX_SYNC_BYTES {
+            self.syntax = Syntax::for_path(&path, self.doc.buffer.rope());
+        } else if len <= SYNTAX_MAX_BYTES {
+            self.start_parse(&path);
+        }
+    }
+
+    // büyük dosya: ilk parse ayrı iş parçacığında, arayüz beklemez
+    fn start_parse(&mut self, path: &std::path::Path) {
+        let (rope, path, version) = (self.doc.buffer.rope().clone(), path.to_path_buf(), self.doc.buffer.version());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Syntax::for_path(&path, &rope));
+        });
+        self.pending_syntax = Some((rx, version));
+    }
+
+    pub fn syntax_pending(&self) -> bool {
+        self.pending_syntax.is_some()
+    }
+
+    // arka plan parse'ı bittiyse devral; bu sırada belge değiştiyse baştan başlat
+    fn poll_syntax(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let Some((rx, started)) = &self.pending_syntax else { return };
+        let started = *started;
+        match rx.try_recv() {
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) | Ok(None) => self.pending_syntax = None,
+            Ok(Some(syntax)) => {
+                self.pending_syntax = None;
+                if self.doc.buffer.version() == started {
+                    self.doc.buffer.take_edits();
+                    self.syntax = Some(syntax);
+                } else if let Some(path) = self.doc.path.clone() {
+                    self.start_parse(&path);
+                }
+            }
+        }
     }
 
     pub fn language(&self) -> &'static str {
@@ -227,6 +267,7 @@ impl Editor {
 
     // görünür satırlar için düz liste: [satır, utf16 başlangıç, utf16 bitiş, tür]*
     pub fn highlights(&mut self, first: usize, last: usize) -> Vec<u32> {
+        self.poll_syntax();
         let edits = self.doc.buffer.take_edits();
         let Some(syntax) = &mut self.syntax else { return Vec::new() };
         let b = &self.doc.buffer;
@@ -834,9 +875,7 @@ impl Editor {
             let parts: Vec<String> = text.split(self.line_ending).map(String::from).collect();
             let n = self.extra.len() + 1;
             let spread = parts.len() == n || (parts.len() == n + 1 && parts[n].is_empty());
-            return self.edit_multi(EditKind::Other, |_, s, i| {
-                (s.range(), if spread { parts[i].clone() } else { text.clone() }, None)
-            });
+            return self.edit_multi(EditKind::Other, |_, s, i| (s.range(), if spread { parts[i].clone() } else { text.clone() }, None));
         }
         let single = text.chars().count() == 1 && !text.contains('\n');
         self.replace_selection(&text, if single { EditKind::Insert } else { EditKind::Other });
@@ -875,9 +914,10 @@ impl Editor {
             let word = trimmed.split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
             if matches!(word, "return" | "pass" | "break" | "continue" | "raise") {
                 let unit = self.indent_unit();
-                let dedented = indent.strip_suffix(unit.as_str()).map(str::to_string).unwrap_or_else(|| {
-                    indent.strip_suffix('\t').unwrap_or(&indent).to_string()
-                });
+                let dedented = indent
+                    .strip_suffix(unit.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| indent.strip_suffix('\t').unwrap_or(&indent).to_string());
                 return self.replace_selection(&format!("{le}{dedented}"), EditKind::Other);
             }
         }
@@ -1237,11 +1277,7 @@ impl Editor {
                     delta = unit.chars().count() as isize;
                 }
             } else {
-                let n = if text.starts_with('\t') {
-                    1
-                } else {
-                    text.chars().take(self.tab_width).take_while(|c| *c == ' ').count()
-                };
+                let n = if text.starts_with('\t') { 1 } else { text.chars().take(self.tab_width).take_while(|c| *c == ' ').count() };
                 if n > 0 {
                     self.edit_raw(start..start + n, "");
                     delta = -(n.min(col) as isize);
@@ -1825,5 +1861,75 @@ mod tests {
         e.move_cursor(Motion::DocEnd, false);
         e.move_cursor(Motion::WordLeft, false);
         assert_eq!(e.selection().head, 8);
+    }
+}
+
+// büyük dosya ölçümleri: cargo test --release -p kern-core -- --ignored --nocapture
+#[cfg(test)]
+mod large_file_tests {
+    use super::*;
+    use std::time::Instant;
+
+    // ~mb megabaytlık Rust kaynağı üretir
+    fn make_file(name: &str, mb: usize) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        if path.metadata().map(|m| m.len() as usize).ok() == Some(mb * 1024 * 1024) {
+            return path;
+        }
+        let block = "fn calculate(value: u32) -> u32 {\n    let total = value * 2; // yorum\n    total + 1\n}\n";
+        let repeats = (1024 * 1024) / block.len() + 1;
+        let chunk: String = block.repeat(repeats);
+        let chunk = &chunk.as_bytes()[..1024 * 1024];
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        for _ in 0..mb {
+            std::io::Write::write_all(&mut f, chunk).unwrap();
+        }
+        std::io::Write::flush(&mut f).unwrap();
+        path
+    }
+
+    fn measure(mb: usize) {
+        let path = make_file(&format!("kern-big-{mb}mb.rs"), mb);
+        let t = Instant::now();
+        let doc = Document::open(&path).unwrap();
+        let open_ms = t.elapsed().as_millis();
+        let t = Instant::now();
+        let mut e = Editor::new(doc);
+        let parse_ms = t.elapsed().as_millis();
+        let lines = e.doc.buffer.len_lines();
+        let t = Instant::now();
+        let mut spans = e.highlights(0, 60);
+        let paint_ms = t.elapsed().as_millis();
+        // arka plan parse'ı varsa bitmesini bekle
+        let t = Instant::now();
+        while e.syntax_pending() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            spans = e.highlights(0, 60);
+        }
+        let background_ms = t.elapsed().as_millis();
+        let t = Instant::now();
+        e.click(lines / 2, 0, false);
+        e.insert_text("x");
+        let edit_ms = t.elapsed().as_millis();
+        let t = Instant::now();
+        let found = e.find_next("calculate", 0, true);
+        let find_ms = t.elapsed().as_millis();
+        println!(
+            "{mb} MB: aç {open_ms} ms · editör {parse_ms} ms · ilk ekran {paint_ms} ms · arka plan renklendirme {background_ms} ms ({} span) · ortadan düzenle {edit_ms} ms · ara {find_ms} ms ({found}) · {lines} satır",
+            spans.len() / 4
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[ignore = "ağır: 50 MB dosya"]
+    fn fifty_megabytes() {
+        measure(50);
+    }
+
+    #[test]
+    #[ignore = "ağır: 1 GB dosya"]
+    fn one_gigabyte() {
+        measure(1024);
     }
 }

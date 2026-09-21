@@ -80,6 +80,10 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     // git: satır → 'A'/'M'/'D'; çakışma: satır → 0 işaret, 1 mevcut, 2 gelen
     var gitMarks: [Int: Character] = [:] { didSet { needsDisplay = true } }
     var conflictLines: [Int: Int] = [:] { didSet { needsDisplay = true } }
+    // hata ayıklama: kesme noktası satırları ve duran satır (0 tabanlı)
+    var breakpointLines: Set<Int> = [] { didSet { if oldValue != breakpointLines { needsDisplay = true } } }
+    var stoppedLine: Int? { didSet { if oldValue != stoppedLine { needsDisplay = true } } }
+    var onToggleBreakpoint: ((Int) -> Void)?
     var keyInterceptor: ((String) -> Bool)?
     var onTyped: ((String) -> Void)?
     var onHover: ((Int, Int, NSPoint) -> Void)?
@@ -300,6 +304,10 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         let first = lineAt(firstRow).line, last = lineAt(lastRow).line
 
         let spans = groupByLine(Array(editor.highlights(UInt(first), UInt(last))), stride: 4)
+        // büyük dosya: ilk renklendirme arka planda bitince tekrar çiz
+        if editor.syntax_pending() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.needsDisplay = true }
+        }
         let matches = findQuery.isEmpty ? [:] : groupByLine(
             Array(editor.find_in_lines(findQuery, findFlags, UInt(first), UInt(last))), stride: 3)
         let bracket = Array(editor.matching_bracket())
@@ -343,6 +351,11 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
             if let c = conflictLines[i] {
                 back.append(.rect(gutter, y, size.width - gutter, lh, c == 2 ? theme.conflictIncoming : theme.conflictCurrent))
+            }
+
+            // duran satır vurgusu
+            if i == stoppedLine {
+                back.append(.rect(gutter, y, size.width - gutter, lh, theme.stoppedLine))
             }
 
             for m in matches[i] ?? [] {
@@ -403,6 +416,18 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                     let mark = layout.shape(folds[i] != nil ? "›" : "⌄")
                     appendGlyphs(mark, x: gutter - layout.charWidth * 1.6, baseline: y + layout.baseline,
                                  into: &front, clip: false) { _ in self.theme.lineNumber }
+                }
+                // kesme noktası ve duran satır işareti
+                if i == stoppedLine {
+                    let arrow = layout.shape("▶")
+                    appendGlyphs(arrow, x: layout.charWidth * 0.2, baseline: y + layout.baseline, into: &front, clip: false) { _ in
+                        self.theme.stoppedArrow
+                    }
+                } else if breakpointLines.contains(i) {
+                    let dot = layout.shape("●")
+                    appendGlyphs(dot, x: layout.charWidth * 0.2, baseline: y + layout.baseline, into: &front, clip: false) { _ in
+                        self.theme.breakpoint
+                    }
                 }
             }
             // git gutter işareti
@@ -751,6 +776,10 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         inputContext?.discardMarkedText()
         markedText = ""
         let (line, col) = position(at: p)
+        // gutter'ın en solu: kesme noktası
+        if p.x < layout.charWidth * 1.6, let toggle = onToggleBreakpoint {
+            return toggle(line)
+        }
         if p.x < gutterWidth && p.x > gutterWidth - layout.charWidth * 2.2 && foldRanges[line] != nil {
             if folds[line] != nil { unfold(line: line) } else { fold(line: line) }
             return
@@ -1060,5 +1089,79 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         revealCursor(center: true)
         restartBlink()
         onChange?(false)
+    }
+}
+
+// VoiceOver: düzenlenebilir metin alanı (konum hesapları UTF-16)
+extension EditorView {
+    private var axText: NSString { editor.text().toString() as NSString }
+
+    // satır başlangıçlarının UTF-16 ofsetleri
+    private func lineStarts(_ text: NSString) -> [Int] {
+        var starts = [0]
+        var i = 0
+        while i < text.length {
+            if text.character(at: i) == 10 { starts.append(i + 1) }
+            i += 1
+        }
+        return starts
+    }
+
+    private func offset(line: Int, col: Int, in text: NSString) -> Int {
+        let starts = lineStarts(text)
+        guard line >= 0, line < starts.count else { return text.length }
+        return min(starts[line] + col, text.length)
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
+    override func accessibilityLabel() -> String? {
+        let path = editor.path().toString()
+        return path.isEmpty ? "Untitled editor" : (path as NSString).lastPathComponent
+    }
+    override func accessibilityHelp() -> String? { editor.language().toString() }
+    override func accessibilityValue() -> Any? { axText as String }
+    override func accessibilityNumberOfCharacters() -> Int { axText.length }
+    override func accessibilitySelectedText() -> String? { editor.selected_text().toString() }
+    override func accessibilityInsertionPointLineNumber() -> Int { Int(editor.cursor_line()) }
+
+    override func accessibilitySelectedTextRange() -> NSRange {
+        let text = axText
+        let start = offset(line: Int(editor.anchor_line()), col: Int(editor.anchor_col()), in: text)
+        let end = offset(line: Int(editor.cursor_line()), col: Int(editor.cursor_col()), in: text)
+        return NSRange(location: min(start, end), length: abs(end - start))
+    }
+
+    override func setAccessibilitySelectedTextRange(_ range: NSRange) {
+        let text = axText
+        let starts = lineStarts(text)
+        let line = (starts.lastIndex { $0 <= range.location }) ?? 0
+        goTo(line: line, col: range.location - starts[line], length: range.length)
+    }
+
+    override func accessibilityString(for range: NSRange) -> String? {
+        let text = axText
+        return text.substring(with: NSIntersectionRange(range, NSRange(location: 0, length: text.length)))
+    }
+
+    override func accessibilityLine(for index: Int) -> Int {
+        (lineStarts(axText).lastIndex { $0 <= index }) ?? 0
+    }
+
+    override func accessibilityRange(forLine line: Int) -> NSRange {
+        let text = axText
+        let starts = lineStarts(text)
+        guard line >= 0, line < starts.count else { return NSRange(location: 0, length: 0) }
+        let end = line + 1 < starts.count ? starts[line + 1] : text.length
+        return NSRange(location: starts[line], length: end - starts[line])
+    }
+
+    override func accessibilityVisibleCharacterRange() -> NSRange {
+        let text = axText
+        let starts = lineStarts(text)
+        let first = min(max(0, topLine), starts.count - 1)
+        let lastRow = min(starts.count - 1, first + Int(drawableSize.height / max(1, layout.lineHeight)))
+        let end = lastRow + 1 < starts.count ? starts[lastRow + 1] : text.length
+        return NSRange(location: starts[first], length: max(0, end - starts[first]))
     }
 }

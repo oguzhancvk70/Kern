@@ -66,8 +66,7 @@ impl Workspace {
         if q.is_empty() {
             return self.files.iter().take(limit).map(String::as_str).collect();
         }
-        let mut scored: Vec<(i64, &str)> =
-            self.files.iter().filter_map(|f| fuzzy_score(f, &q).map(|s| (s, f.as_str()))).collect();
+        let mut scored: Vec<(i64, &str)> = self.files.iter().filter_map(|f| fuzzy_score(f, &q).map(|s| (s, f.as_str()))).collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
         scored.into_iter().take(limit).map(|(_, f)| f).collect()
     }

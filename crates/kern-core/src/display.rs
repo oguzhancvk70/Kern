@@ -31,10 +31,12 @@ pub fn wrap_breaks(line: &str, cols: usize) -> Vec<usize> {
 }
 
 pub fn wrap_rows(buf: &Buffer, cols: usize) -> Vec<u32> {
-    (0..buf.len_lines()).map(|i| {
-        let len = buf.line_len(i);
-        if len * TAB <= cols.max(8) { 1 } else { 1 + wrap_breaks(&buf.line(i), cols).len() as u32 }
-    }).collect()
+    (0..buf.len_lines())
+        .map(|i| {
+            let len = buf.line_len(i);
+            if len * TAB <= cols.max(8) { 1 } else { 1 + wrap_breaks(&buf.line(i), cols).len() as u32 }
+        })
+        .collect()
 }
 
 fn indent_of(line: &str) -> Option<usize> {

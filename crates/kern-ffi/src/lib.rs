@@ -89,6 +89,7 @@ mod ffi {
         fn language(&self) -> String;
         fn line_ending_name(&self) -> String;
         fn highlights(&mut self, first: usize, last: usize) -> Vec<u32>;
+        fn syntax_pending(&self) -> bool;
         fn matching_bracket(&self) -> Vec<u32>;
         fn toggle_comment(&mut self);
         fn indent_lines(&mut self, indent: bool);
@@ -112,7 +113,15 @@ mod ffi {
     extern "Rust" {
         type KernTerminal;
 
-        fn spawn_terminal(cwd: &str, cols: usize, rows: usize, cell_w: u16, cell_h: u16, scrollback: usize, env: &str) -> Option<KernTerminal>;
+        fn spawn_terminal(
+            cwd: &str,
+            cols: usize,
+            rows: usize,
+            cell_w: u16,
+            cell_h: u16,
+            scrollback: usize,
+            env: &str,
+        ) -> Option<KernTerminal>;
         fn cwd(&self) -> String;
         fn last_exit(&self) -> i32;
         fn marks(&self) -> Vec<i32>;
@@ -202,6 +211,32 @@ mod ffi {
         fn pull(&self) -> String;
         fn blame(&self, path: &str, line: usize, contents: &str) -> String;
         fn line_changes(&self, path: &str, current: &str) -> String;
+    }
+
+    extern "Rust" {
+        type KernDebug;
+
+        fn debug_configs(root: &str) -> String;
+        fn debug_suggest(path: &str) -> String;
+        fn debug_adapter_status(kind: &str) -> String;
+        fn debug_last_error() -> String;
+        fn debug_start(root: &str, config_json: &str, breakpoints_json: &str) -> Option<KernDebug>;
+        fn version(&self) -> u64;
+        fn is_alive(&self) -> bool;
+        fn status(&self) -> String;
+        fn output(&self) -> String;
+        fn set_breakpoints(&self, path: &str, lines: &str) -> String;
+        fn breakpoints(&self, path: &str) -> String;
+        fn threads(&self) -> String;
+        fn stack_trace(&self, thread: i64) -> String;
+        fn scopes(&self, frame: i64) -> String;
+        fn variables(&self, reference: i64) -> String;
+        fn evaluate(&self, expr: &str, frame: i64, context: &str) -> String;
+        fn set_variable(&self, reference: i64, name: &str, value: &str) -> String;
+        fn select_frame(&self, frame: i64);
+        fn resume(&self, command: &str) -> String;
+        fn pause(&self) -> String;
+        fn terminate(&self);
     }
 
     extern "Rust" {
@@ -432,6 +467,112 @@ impl KernLsp {
     }
 }
 
+// hata ayıklama oturumu; JSON metni, hata: {"error": "..."}
+pub struct KernDebug(kern_dap::Session);
+
+static DEBUG_ERROR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn debug_configs(root: &str) -> String {
+    kern_dap::load_configs(std::path::Path::new(root)).to_string()
+}
+
+fn debug_suggest(path: &str) -> String {
+    kern_dap::suggest_config(std::path::Path::new(path)).unwrap_or(kern_lsp::serde_json::Value::Null).to_string()
+}
+
+fn debug_adapter_status(kind: &str) -> String {
+    kern_dap::adapter_status(kind)
+}
+
+fn debug_last_error() -> String {
+    DEBUG_ERROR.lock().unwrap().clone()
+}
+
+// config_json: launch.json girdisi, breakpoints_json: {yol: [satırlar]}
+fn debug_start(root: &str, config_json: &str, breakpoints_json: &str) -> Option<KernDebug> {
+    use kern_lsp::serde_json::{Value, from_str};
+    let config: Value = from_str(config_json).unwrap_or(Value::Null);
+    let bps: Value = from_str(breakpoints_json).unwrap_or(Value::Null);
+    match kern_dap::Session::start(std::path::Path::new(root), &config, &bps) {
+        Ok(s) => {
+            DEBUG_ERROR.lock().unwrap().clear();
+            Some(KernDebug(s))
+        }
+        Err(e) => {
+            *DEBUG_ERROR.lock().unwrap() = e;
+            None
+        }
+    }
+}
+
+impl KernDebug {
+    fn version(&self) -> u64 {
+        self.0.version()
+    }
+
+    fn is_alive(&self) -> bool {
+        self.0.is_alive()
+    }
+
+    fn status(&self) -> String {
+        self.0.status().to_string()
+    }
+
+    fn output(&self) -> String {
+        self.0.take_output().to_string()
+    }
+
+    // lines: virgülle ayrılmış 1 tabanlı satırlar
+    fn set_breakpoints(&self, path: &str, lines: &str) -> String {
+        let lines: Vec<u32> = lines.split(',').filter_map(|l| l.trim().parse().ok()).collect();
+        self.0.set_breakpoints(path, &lines).to_string()
+    }
+
+    fn breakpoints(&self, path: &str) -> String {
+        self.0.breakpoints(path).to_string()
+    }
+
+    fn threads(&self) -> String {
+        json_result(self.0.threads())
+    }
+
+    fn stack_trace(&self, thread: i64) -> String {
+        json_result(self.0.stack_trace(thread))
+    }
+
+    fn scopes(&self, frame: i64) -> String {
+        json_result(self.0.scopes(frame))
+    }
+
+    fn variables(&self, reference: i64) -> String {
+        json_result(self.0.variables(reference))
+    }
+
+    fn evaluate(&self, expr: &str, frame: i64, context: &str) -> String {
+        json_result(self.0.evaluate(expr, (frame >= 0).then_some(frame), context))
+    }
+
+    fn set_variable(&self, reference: i64, name: &str, value: &str) -> String {
+        json_result(self.0.set_variable(reference, name, value))
+    }
+
+    fn select_frame(&self, frame: i64) {
+        self.0.select_frame(frame);
+    }
+
+    fn resume(&self, command: &str) -> String {
+        json_result(self.0.resume_all(command))
+    }
+
+    fn pause(&self) -> String {
+        json_result(self.0.pause())
+    }
+
+    fn terminate(&self) {
+        self.0.terminate();
+    }
+}
+
 pub struct KernExtensions(kern_ext::Registry);
 
 impl KernExtensions {
@@ -451,8 +592,10 @@ impl KernExtensions {
             .0
             .extensions
             .iter()
-            .map(|e| json!({ "id": e.id, "name": e.manifest["name"], "version": e.manifest["version"],
-                             "description": e.manifest["description"], "permissions": e.permissions, "dir": e.dir }))
+            .map(|e| {
+                json!({ "id": e.id, "name": e.manifest["name"], "version": e.manifest["version"],
+                             "description": e.manifest["description"], "permissions": e.permissions, "dir": e.dir })
+            })
             .collect();
         kern_lsp::serde_json::Value::Array(v).to_string()
     }
@@ -950,6 +1093,11 @@ impl KernEditor {
         e.highlights(first, last)
     }
 
+    // büyük dosyada ilk renklendirme arka planda; Swift buna bakıp yeniden çizer
+    fn syntax_pending(&self) -> bool {
+        self.e().syntax_pending()
+    }
+
     fn matching_bracket(&self) -> Vec<u32> {
         let mut g = self.e();
         let e = &mut *g;
@@ -1068,5 +1216,175 @@ impl KernEditor {
         let mut g = self.e();
         let e = &mut *g;
         e.replace_all(query, replacement, flags)
+    }
+}
+
+// FFI sınırı: Swift'in bağlı olduğu dönüş biçimleri
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kern_lsp::serde_json::Value;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kern-ffi-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn editor_roundtrip() {
+        let dir = tmp("editor");
+        let path = dir.join("a.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        let mut e = open_editor(path.to_str().unwrap()).expect("editör");
+        assert_eq!(e.line_count(), 2);
+        assert_eq!(e.language(), "Rust");
+        assert_eq!(e.line_ending_name(), "LF");
+        assert_eq!(e.encoding_name(), "UTF-8");
+        assert!(!e.is_dirty());
+        e.select_range(0, 3, 4);
+        assert_eq!(e.selected_text(), "main");
+        e.insert_text("start");
+        assert!(e.is_dirty());
+        assert_eq!(e.line(0), "fn start() {}");
+        // renklendirme: [satır, başlangıç, bitiş, tür] dörtlüleri
+        let spans = e.highlights(0, 0);
+        assert_eq!(spans.len() % 4, 0);
+        assert!(!spans.is_empty());
+        assert!(e.undo());
+        assert_eq!(e.line(0), "fn main() {}");
+        // LSP biçimli düzenleme
+        let edit = r#"[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":2}},"newText":"pub fn"}]"#;
+        assert!(e.apply_edits(edit));
+        assert_eq!(e.line(0), "pub fn main() {}");
+        assert_eq!(e.save(), "");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "pub fn main() {}\n");
+        assert!(!e.is_dirty());
+        // bölünmüş görünüm aynı belgeyi paylaşır, imleci ayrıdır
+        e.collapse_selection();
+        let mut split = e.split_view();
+        split.select_range(0, 0, 3);
+        assert_eq!(split.selected_text(), "pub");
+        assert!(!e.has_selection());
+        split.insert_text("PUB");
+        assert_eq!(e.line(0), "PUB fn main() {}");
+        assert_eq!(e.version(), split.version());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_errors_and_search() {
+        assert!(open_editor("/kern/yok/dosya.txt").is_none());
+        assert!(!find_error("(", 4).is_empty(), "geçersiz regex hata vermeli");
+        assert!(find_error("(", 0).is_empty(), "düz metin hatasız");
+        let mut e = KernEditor::new();
+        e.insert_text("bir\niki\nbir\n");
+        assert_eq!(e.find_status("bir", 0), vec![2, 0]);
+        assert_eq!(e.replace_all("bir", "üç", 0), 2);
+        assert_eq!(e.text(), "üç\niki\nüç\n");
+        assert_eq!(e.find_in_lines("iki", 0, 0, 2), vec![1, 0, 3]);
+        assert!(!kern_version().is_empty());
+    }
+
+    #[test]
+    fn workspace_and_stream_search() {
+        let dir = tmp("ws");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "let needle = 1;\n").unwrap();
+        std::fs::write(dir.join("README.md"), "no match here\n").unwrap();
+        let ws = KernWorkspace::new(dir.to_str().unwrap());
+        assert_eq!(ws.file_count(), 2);
+        assert_eq!(ws.quick_open("mainrs", 10), "src/main.rs");
+        let job = ws.start_search("needle", 0, 100).expect("arama");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut hits = String::new();
+        while !job.is_done() || !hits.contains("needle") {
+            hits.push_str(&job.poll());
+            assert!(std::time::Instant::now() < deadline, "arama bitmedi: {hits}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let fields: Vec<&str> = hits.trim_end().split('\t').collect();
+        assert_eq!(fields[0], "src/main.rs");
+        assert_eq!(fields[1], "0");
+        assert_eq!(fields[2], "4");
+        assert_eq!(job.total(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repo_json_contract() {
+        let dir = tmp("repo");
+        let run = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "Tester"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        let repo = discover_repo(dir.to_str().unwrap()).expect("depo");
+        assert_eq!(repo.status(), "??\ta.txt\n");
+        let ok = |raw: String| -> bool {
+            let v: Value = kern_lsp::serde_json::from_str(&raw).unwrap();
+            v.get("ok").is_some() && v.get("error").is_none()
+        };
+        assert!(ok(repo.stage("a.txt")));
+        assert_eq!(repo.status(), "A \ta.txt\n");
+        assert!(ok(repo.commit("first", false)));
+        assert_eq!(repo.status(), "");
+        assert_eq!(repo.branch(), "main");
+        // hata da JSON: {"error": "..."}
+        let bad: Value = kern_lsp::serde_json::from_str(&repo.checkout("main", true)).unwrap();
+        assert!(bad.get("error").is_some(), "var olan dalı oluşturmak hata vermeli");
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        let changes = repo.line_changes("a.txt", "one\ntwo\n");
+        assert_eq!(changes.trim_end(), "1\t1\tA");
+        assert!(repo.blame("a.txt", 1, "one\ntwo\n").contains("Uncommitted"));
+        assert_eq!(vcs_conflicts("a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> x\n").trim_end(), "1\t3\t5");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn debug_contract() {
+        let dir = tmp("dap");
+        std::fs::create_dir_all(dir.join(".kern")).unwrap();
+        std::fs::write(
+            dir.join(".kern/launch.json"),
+            "{\"configurations\":[{\"type\":\"lldb\",\"name\":\"app\",\"program\":\"/bin/ls\"}]}",
+        )
+        .unwrap();
+        let configs: Value = kern_lsp::serde_json::from_str(&debug_configs(dir.to_str().unwrap())).unwrap();
+        assert_eq!(configs[0]["name"], "app");
+        let suggest: Value = kern_lsp::serde_json::from_str(&debug_suggest("/x/a.py")).unwrap();
+        assert_eq!(suggest["type"], "python");
+        assert_eq!(debug_suggest("/x/a.txt"), "null");
+        assert!(debug_adapter_status("ruby").starts_with("unsupported"));
+        // desteklenmeyen tür: oturum yok, hata saklanır
+        let bad = debug_start(dir.to_str().unwrap(), "{\"type\":\"ruby\",\"request\":\"launch\"}", "{}");
+        assert!(bad.is_none());
+        assert!(debug_last_error().contains("ruby"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_contract() {
+        let Some(mut term) = spawn_terminal("/tmp", 40, 8, 8, 16, 200, "KERN_TEST=1") else {
+            return;
+        };
+        term.write_text("printf 'hello-ffi\\n'\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let _ = term.take_dirty();
+            let screen: String = (0..8).map(|r| term.row_text(r)).collect::<Vec<_>>().join("\n");
+            if screen.contains("hello-ffi") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "terminal çıktısı gelmedi: {screen}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(term.is_alive());
+        term.resize(60, 10, 8, 16);
+        // anlık görüntü: hücre başına (kod, renk) çiftleri
+        assert!(!term.snapshot().is_empty());
     }
 }

@@ -224,6 +224,13 @@ Bunlar hedef değil, **kabul kriteri**. CI'da ölçülür, aşılırsa merge yok
 | Boşta RAM (orta proje) | < 250 MB |
 | Boşta CPU | %0 |
 
+Ölçülen (M-serisi, release, `cargo test --release -p kern-core -- --ignored --nocapture`):
+
+| Dosya | Açma | İlk ekran | Renklendirme | Ortadan düzenleme | Arama |
+|---|---|---|---|---|---|
+| 50 MB (2.4M satır) | 24 ms | < 1 ms | 3.0 s (arka planda, arayüz beklemez) | < 1 ms | 356 ms |
+| 1 GB (50M satır) | 431 ms | < 1 ms | kapalı (sınır 50 MB) | < 1 ms | 375 ms |
+
 ---
 
 ## 7. Yol haritası

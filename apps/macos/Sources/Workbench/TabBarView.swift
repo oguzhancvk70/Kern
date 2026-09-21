@@ -153,4 +153,42 @@ final class TabBarView: FlippedView {
         clampOffset()
         needsDisplay = true
     }
+
+    // erişilebilirlik: her sekme ayrı öğe
+
+    override func isAccessibilityElement() -> Bool { false }
+    override func accessibilityRole() -> NSAccessibility.Role? { .tabGroup }
+    override func accessibilityLabel() -> String? { "Editor Tabs" }
+    override func accessibilityValue() -> Any? { active >= 0 && active < items.count ? items[active].title : nil }
+
+    override func accessibilityChildren() -> [Any]? {
+        let rects = tabRects()
+        return items.enumerated().map { i, item in
+            let e = TabElement()
+            e.bar = self
+            e.index = i
+            e.setAccessibilityParent(self)
+            e.setAccessibilityRole(.radioButton)
+            e.setAccessibilityLabel(item.title + (item.dirty ? ", unsaved" : ""))
+            e.setAccessibilityHelp(item.path)
+            e.setAccessibilityValue(i == active ? 1 : 0)
+            e.setAccessibilityFrameInParentSpace(rects[i])
+            return e
+        }
+    }
+
+    override func accessibilitySelectedChildren() -> [Any]? {
+        guard active >= 0, let children = accessibilityChildren(), active < children.count else { return nil }
+        return [children[active]]
+    }
+}
+
+final class TabElement: NSAccessibilityElement {
+    weak var bar: TabBarView?
+    var index = 0
+
+    override func accessibilityPerformPress() -> Bool {
+        bar?.onSelect?(index)
+        return true
+    }
 }

@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Settings.shared.reload()
         Extensions.shared.reload()
+        Updater.shared.start()
         NSApp.mainMenu = MainMenu.make()
         Settings.shared.applyKeymap(to: NSApp.mainMenu)
         for name in [Settings.changed, Extensions.changed] {
@@ -166,6 +167,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseDirectories = true
         guard panel.runModal() == .OK else { return }
         panel.urls.forEach(open)
+    }
+
+    @objc func checkForUpdates(_ sender: Any?) {
+        Updater.shared.checkForUpdates()
     }
 
     @objc func openFolder(_ sender: Any?) {

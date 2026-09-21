@@ -49,7 +49,8 @@ pub fn setup() -> (Option<(String, Vec<String>)>, HashMap<String, String>) {
                 return (None, env);
             }
             // kullanıcının dosyalarını sırayla yükle, ZDOTDIR'i bizde tut, sonunda geri ver
-            let src = |f: &str| format!("[ -f \"$KERN_USER_ZDOTDIR/{f}\" ] && ZDOTDIR=\"$KERN_USER_ZDOTDIR\" . \"$KERN_USER_ZDOTDIR/{f}\"\n");
+            let src =
+                |f: &str| format!("[ -f \"$KERN_USER_ZDOTDIR/{f}\" ] && ZDOTDIR=\"$KERN_USER_ZDOTDIR\" . \"$KERN_USER_ZDOTDIR/{f}\"\n");
             let files = [
                 (".zshenv", src(".zshenv")),
                 (".zprofile", src(".zprofile")),

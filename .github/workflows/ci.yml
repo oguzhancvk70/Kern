@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  rust:
+    name: Rust (fmt + test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target.nosync
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Format
+        run: cargo fmt --check
+      - name: Test
+        run: cargo test --workspace
+
+  app:
+    name: Uygulama (build + self-test)
+    # Swift 6.3 / macOS 26 SDK gerekiyor; imajda Xcode 26+ olmalı
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          brew install xcodegen
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target.nosync
+          key: app-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: app-cargo-${{ runner.os }}-
+      - name: Bootstrap
+        run: ./scripts/bootstrap.sh
+      - name: Build
+        run: |
+          xcodebuild -project apps/macos/Kern.xcodeproj -scheme Kern \
+            -derivedDataPath "$RUNNER_TEMP/dd" -configuration Debug build
+      - name: Self-test
+        run: |
+          APP="$RUNNER_TEMP/dd/Build/Products/Debug/Kern.app"
+          mkdir -p "$RUNNER_TEMP/kern-config"
+          KERN_CONFIG_DIR="$RUNNER_TEMP/kern-config" \
+          KERN_SELFTEST="$RUNNER_TEMP/selftest.txt" \
+            "$APP/Contents/MacOS/Kern"
+      - name: Rapor
+        if: always()
+        run: cat "$RUNNER_TEMP/selftest.txt" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest
+          path: ${{ runner.temp }}/selftest.txt
+          if-no-files-found: ignore

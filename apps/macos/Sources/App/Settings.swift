@@ -14,6 +14,7 @@ final class Settings {
         "editor.wordWrap": false,
         "editor.minimap": true,
         "workbench.colorTheme": "system",
+        "update.automatic": true,
         "terminal.optionAsMeta": true,
         "terminal.scrollback": 10000,
         "terminal.fontSize": 12,

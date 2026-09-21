@@ -69,9 +69,8 @@ impl Encoding {
             }
             Encoding::Latin1 => {
                 for c in buffer.rope().chars() {
-                    let b = u8::try_from(u32::from(c)).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidData, format!("'{c}' cannot be saved as Latin-1"))
-                    })?;
+                    let b = u8::try_from(u32::from(c))
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("'{c}' cannot be saved as Latin-1")))?;
                     w.write_all(&[b])?;
                 }
                 Ok(())
@@ -119,10 +118,7 @@ impl Document {
 
     // atomik kaydetme: aynı dizinde geçici dosya → fsync → rename
     pub fn save(&mut self) -> io::Result<()> {
-        let path = self
-            .path
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "document has no path"))?;
+        let path = self.path.as_ref().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "document has no path"))?;
         let target = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
         let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
         let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

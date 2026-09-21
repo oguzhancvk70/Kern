@@ -66,6 +66,8 @@ final class WorkbenchView: FlippedView {
     let search = SearchPanel()
     let ai = ChatPanel()
     let scm = SourceControlPanel()
+    let debug = DebugPanel()
+    let console = DebugConsole()
     let handle = SplitHandle()
     let welcome = WelcomeView()
     let findBar = FindBar()
@@ -78,6 +80,7 @@ final class WorkbenchView: FlippedView {
     var panel = 0
     var hasEditors = false
     var terminalVisible = false
+    var consoleVisible = false
     var terminalHeight: CGFloat = 280
     var groupViews: [GroupView] = [] {
         didSet {
@@ -113,7 +116,7 @@ final class WorkbenchView: FlippedView {
         background = Palette.editor
         findBar.isHidden = true
         terminalHandle.vertical = true
-        [activity, explorer, search, ai, scm, welcome, findBar, terminal, terminalHandle, handle, status].forEach(addSubview)
+        [activity, explorer, search, ai, scm, debug, welcome, findBar, terminal, console, terminalHandle, handle, status].forEach(addSubview)
         handle.onDrag = { [weak self] dx in
             guard let self else { return }
             self.sidebarWidth = min(max(170, self.sidebarWidth + dx), 640)
@@ -145,11 +148,14 @@ final class WorkbenchView: FlippedView {
         ai.isHidden = !(sidebarVisible && panel == 2)
         scm.frame = explorer.frame
         scm.isHidden = !(sidebarVisible && panel == 3)
+        debug.frame = explorer.frame
+        debug.isHidden = !(sidebarVisible && panel == 4)
         handle.frame = NSRect(x: act + side - 2, y: 0, width: 5, height: body)
         handle.isHidden = !sidebarVisible
 
         let x = act + side
-        let termH = terminalVisible ? min(terminalHeight, body - 160) : 0
+        let bottomVisible = terminalVisible || consoleVisible
+        let termH = bottomVisible ? min(terminalHeight, body - 160) : 0
         let area = body - termH
         let crumbsH: CGFloat = 22
         editorWidth = w - x
@@ -168,9 +174,12 @@ final class WorkbenchView: FlippedView {
         }
         welcome.isHidden = hasEditors
         welcome.frame = NSRect(x: x, y: 0, width: w - x, height: area)
+        // alt panel: terminal ya da hata ayıklama konsolu
         terminal.isHidden = !terminalVisible
         terminal.frame = NSRect(x: x, y: area, width: w - x, height: termH)
-        terminalHandle.isHidden = !terminalVisible
+        console.isHidden = terminalVisible || !consoleVisible
+        console.frame = terminal.frame
+        terminalHandle.isHidden = !bottomVisible
         terminalHandle.frame = NSRect(x: x, y: area - 2, width: w - x, height: 5)
 
         let fw = min(460, max(300, focusFrame.width - 60))
@@ -213,6 +222,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
     private var fsRefresh: DispatchWorkItem?
     private var askingConflict = false
     let git = GitState()
+    let debug = DebugState()
 
     var activeTab: EditorTab? { active >= 0 && active < tabs.count ? tabs[active] : nil }
     var isEmpty: Bool { folder == nil && allTabs.allSatisfy(\.isPristine) }
@@ -300,6 +310,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         watcher.onChange = { [weak self] paths in self?.filesChanged(paths) }
         wireAI()
         wireGit()
+        wireDebug()
     }
 
     // ayarlar
@@ -491,6 +502,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         updateWatch()
         Settings.shared.setProject(url)
         restartLanguage()
+        refreshConfigs()
         UserDefaults.standard.set(url.path, forKey: "lastFolder")
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
         queue.async { [weak self] in
@@ -617,11 +629,16 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             self.update(tabsOnly: !edited)
             if edited && !self.root.findBar.isHidden { self.updateFindCount() }
         }
+        view.onToggleBreakpoint = { [weak self, weak tab] line in
+            guard let self, let tab, !tab.path.isEmpty else { return }
+            self.setBreakpoint(path: tab.path, line: line, on: !(self.debug.breakpoints[tab.path]?.contains(line) ?? false))
+        }
         let at = active >= 0 ? active + 1 : tabs.count
         tabs.insert(tab, at: at)
         select(at)
         updateWatch()
         gitMarks(tab)
+        debugSync(tab)
         return tab
     }
 
@@ -766,7 +783,8 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         }
         root.status.right = right
         root.status.left = [folder.map { "⌂ \($0.lastPathComponent)" } ?? "No Folder"] + ((git.branch.isEmpty ? branch : git.branch).map { ["⎇ \($0)"] } ?? [])
-            + ["⊗ \(diagnosticCounts.errors)  ⚠ \(diagnosticCounts.warnings)"] + (git.blame.isEmpty ? [] : [git.blame])
+            + ["⊗ \(diagnosticCounts.errors)  ⚠ \(diagnosticCounts.warnings)"] + (debug.statusText.isEmpty ? [] : [debug.statusText])
+            + (git.blame.isEmpty ? [] : [git.blame])
         if let tab, !tab.path.isEmpty, let s = language?.status(tab.path), !s.isEmpty {
             right.append(s == "ok" ? "{ } LSP" : s.hasPrefix("missing") ? "⚠ No Language Server" : s == "starting" ? "LSP…" : "⚠ LSP Error")
         }
@@ -970,6 +988,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         watcher.stop()
+        stopDebugging(nil)
         onClose?(self)
     }
 

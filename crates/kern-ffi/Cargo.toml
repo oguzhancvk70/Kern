@@ -13,6 +13,7 @@ kern-core.workspace = true
 kern-search = { version = "0.1.0", path = "../kern-search" }
 kern-term = { version = "0.1.0", path = "../kern-term" }
 kern-lsp = { version = "0.1.0", path = "../kern-lsp" }
+kern-dap = { version = "0.1.0", path = "../kern-dap" }
 kern-ext = { version = "0.1.0", path = "../kern-ext" }
 kern-vcs = { version = "0.1.0", path = "../kern-vcs" }
 swift-bridge = "0.1.59"

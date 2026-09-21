@@ -7,6 +7,11 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.4
+
 targets:
   Kern:
     type: application
@@ -20,6 +25,10 @@ targets:
       - path: Resources/extensions
         type: folder
       - Resources/AppIcon.icns
+      - path: Kern.entitlements
+        buildPhase: none
+    dependencies:
+      - package: Sparkle
     info:
       path: Info.plist
       properties:
@@ -29,6 +38,9 @@ targets:
         CFBundleIconFile: AppIcon
         NSPrincipalClass: NSApplication
         NSHighResolutionCapable: true
+        SUFeedURL: https://github.com/oguzhancvk70/Kern/releases/latest/download/appcast.xml
+        SUPublicEDKey: ""
+        SUEnableAutomaticChecks: true
         CFBundleURLTypes:
           - CFBundleURLName: dev.kern.open
             CFBundleURLSchemes: [kern]
@@ -48,6 +60,11 @@ targets:
           LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/../../target.nosync/universal/debug
         Release:
           LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/../../target.nosync/universal/release
+          # notarization için: sabit kimlik, hardened runtime, entitlement'lar
+          ENABLE_HARDENED_RUNTIME: YES
+          CODE_SIGN_ENTITLEMENTS: Kern.entitlements
+          CODE_SIGN_IDENTITY: "-"
+          OTHER_CODE_SIGN_FLAGS: --timestamp
     preBuildScripts:
       - name: Rust kern-ffi
         script: '"$PROJECT_DIR/../../scripts/build-rust.sh"'

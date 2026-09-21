@@ -23,6 +23,9 @@ struct Theme {
     var gitDeleted = rgb(0xF85149)
     var conflictCurrent = rgb(0x2EA043, 0.18)
     var conflictIncoming = rgb(0x0078D4, 0.18)
+    var breakpoint = rgb(0xE51400)
+    var stoppedArrow = rgb(0xFFCC00)
+    var stoppedLine = rgb(0xFFCC00, 0.16)
     var syntax: [SIMD4<Float>]
 
     func color(for token: UInt32) -> SIMD4<Float> {

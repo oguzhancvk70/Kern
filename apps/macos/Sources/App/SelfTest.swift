@@ -364,7 +364,60 @@ final class SelfTest {
             self.check("oturum beş sekme", s?.tabs.count == 5)
             self.check("etkin sekme b.rs", s.map { $0.tabs[$0.active].path.hasSuffix("b.rs") } ?? false)
         }
+        accessibilityScenarios()
         gitScenarios()
+        debugScenarios()
+    }
+
+    // erişilebilirlik ve IME (işaretli metin)
+    private func accessibilityScenarios() {
+        step("erişilebilirlik") {
+            self.c.openFile(self.file("a.txt"))
+            guard let v = self.view else { return self.check("a.txt açıldı", false) }
+            v.editor.select_all()
+            v.editor.insert_text("bir\niki\nüç\n")
+            v.changed(edited: true)
+            v.goTo(line: 1, col: 1, length: 2)
+            self.check("rol metin alanı", v.accessibilityRole() == .textArea && v.isAccessibilityElement())
+            self.check("ad dosya adı", v.accessibilityLabel() == "a.txt")
+            self.check("değer tüm metin", v.accessibilityValue() as? String == "bir\niki\nüç\n")
+            self.check("karakter sayısı", v.accessibilityNumberOfCharacters() == 11)
+            self.check("seçim aralığı", v.accessibilitySelectedTextRange() == NSRange(location: 5, length: 2))
+            self.check("seçili metin", v.accessibilitySelectedText() == "ki")
+            self.check("satır aralığı", v.accessibilityRange(forLine: 2) == NSRange(location: 8, length: 3))
+            self.check("konumdan satır", v.accessibilityLine(for: 9) == 2)
+            self.check("aralıktan metin", v.accessibilityString(for: NSRange(location: 0, length: 3)) == "bir")
+            v.setAccessibilitySelectedTextRange(NSRange(location: 8, length: 2))
+            self.check("VoiceOver seçim yaptı", v.editor.cursor_line() == 2 && v.editor.selected_text().toString() == "üç")
+        }
+        step("arayüz etiketleri") {
+            let bar = self.c.root.status
+            self.check("durum çubuğu okunuyor", bar.accessibilityRole() == .staticText
+                && (bar.accessibilityValue() as? String)?.contains("Ln ") == true)
+            let tabs = self.c.groups[0].view.tabBar
+            let children = tabs.accessibilityChildren() as? [TabElement] ?? []
+            self.check("sekmeler öğe", tabs.accessibilityRole() == .tabGroup && children.count == self.c.tabs.count)
+            self.check("sekme adı", children.first?.accessibilityLabel()?.hasPrefix("a.txt") == true)
+            let crumbs = self.c.groups[0].view.breadcrumbs
+            self.check("breadcrumb okunuyor", (crumbs.accessibilityValue() as? String)?.hasSuffix("a.txt") == true)
+            let button = self.c.root.activity.subviews.compactMap { $0 as? NSButton }.first
+            self.check("aktivite düğmesi etiketli", button?.accessibilityLabel()?.hasPrefix("Explorer") == true)
+        }
+        step("IME işaretli metin") {
+            guard let v = self.view else { return self.check("editör", false) }
+            v.editor.select_all()
+            v.editor.insert_text("")
+            v.changed(edited: true)
+            v.setMarkedText("にほ", selectedRange: NSRange(location: 2, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+            self.check("işaretli metin var", v.hasMarkedText() && v.markedRange().length == 2)
+            self.check("tampona yazılmadı", v.editor.text().toString() == "")
+            v.insertText("日本", replacementRange: NSRange(location: NSNotFound, length: 0))
+            self.check("dönüştürme yazıldı", v.editor.text().toString() == "日本" && !v.hasMarkedText())
+            v.setMarkedText("ç", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+            v.unmarkText()
+            self.check("işaret kaldırılınca eklendi", v.editor.text().toString() == "日本ç" && !v.hasMarkedText())
+            self.check("imleç UTF-16 sonunda", v.selectedRange().location == 3)
+        }
     }
 
     @discardableResult
@@ -431,5 +484,80 @@ final class SelfTest {
             self.c.gitMarks(tab)
             self.check("çakışma vurgusu kalktı", v.conflictLines.isEmpty)
         }
+    }
+
+    // hata ayıklama: kesme noktaları, launch.json, canlı lldb-dap oturumu
+    private func debugScenarios() {
+        let panel = { self.c.root.debug }
+        // kaynak senaryo kurulurken yazılır: canlı oturum kararı derlemeye bakar
+        let source = "#include <stdio.h>\nint main(void) {\n  int total = 0;\n  for (int i = 1; i <= 3; i++) total += i;\n  printf(\"total=%d\\n\", total);\n  return 0;\n}\n"
+        try? source.write(to: file("d.c"), atomically: true, encoding: .utf8)
+        step("kesme noktası") {
+            self.c.openFile(self.file("d.c"))
+            guard let v = self.view else { return self.check("d.c açıldı", false) }
+            v.goTo(line: 4, col: 0)
+            self.c.toggleBreakpoint(nil)
+            self.check("gutter işareti", v.breakpointLines == [4])
+            self.check("durumda tutuldu", self.c.debug.breakpoints[self.file("d.c").path] == [4])
+            let bps = panel().roots.first { $0.title == "Breakpoints" }?.children ?? []
+            self.check("panelde listelendi", bps.count == 1 && bps[0].detail == "5")
+            self.c.toggleBreakpoint(nil)
+            self.check("kaldırıldı", v.breakpointLines.isEmpty && self.c.debug.breakpoints.isEmpty)
+            v.onToggleBreakpoint?(4)
+            self.check("gutter tıklaması ekledi", v.breakpointLines == [4])
+        }
+        step("launch.json") {
+            self.c.openLaunchJSON(nil)
+            self.check("dosya yazıldı", self.read(".kern/launch.json").contains("configurations"))
+            self.c.refreshConfigs()
+            self.check("konfigürasyon okundu", self.c.debug.configs.count == 1)
+            self.check("desteklenmeyen tür", debug_adapter_status("ruby").toString().hasPrefix("unsupported"))
+            self.c.toggleDebugConsole(nil)
+            self.check("konsol göründü", self.c.root.consoleVisible && !self.c.root.console.isHidden)
+            self.c.root.console.onEvaluate?("1 + 1")
+            self.check("oturumsuz değerlendirme", self.c.root.console.contents.contains("No active debug session"))
+        }
+        guard debug_adapter_status("lldb").toString() == "ok", compile("d.c", "d") else {
+            lines.append("# lldb-dap veya clang yok: canlı oturum atlandı")
+            return
+        }
+        step("oturumu başlat") {
+            let config: [String: Any] = ["version": "0.2.0", "configurations": [
+                ["name": "d", "type": "lldb", "request": "launch", "program": self.file("d").path, "cwd": self.dir.path]]]
+            try? JSONSerialization.data(withJSONObject: config).write(to: self.file(".kern/launch.json"))
+            self.c.refreshConfigs()
+            self.c.startDebugging(nil)
+        }
+        wait("kesme noktasında durdu", timeout: 40) { self.c.debug.state == "stopped" }
+        step("durma durumu") {
+            self.check("duran satır işaretlendi", self.view?.stoppedLine == 4)
+            self.check("durum çubuğu", self.c.debug.statusText.hasPrefix("⏸") && self.c.root.status.left.contains(self.c.debug.statusText))
+            let frames = panel().roots.first { $0.title == "Call Stack" }?.children ?? []
+            self.check("çağrı yığını", frames.first?.title == "main" && frames.first?.detail == "d.c:5")
+            let scopes = panel().roots.first { $0.title == "Variables" }?.children ?? []
+            let locals = scopes.first?.children ?? []
+            self.check("yerel değişkenler", locals.contains { $0.title == "total" && $0.detail == "6" })
+        }
+        step("ifade değerlendir") { self.c.root.console.onEvaluate?("total * 2") }
+        wait("sonuç konsolda") { self.c.root.console.contents.contains("12") }
+        step("devam et") { self.c.debugContinue(nil) }
+        wait("oturum bitti", timeout: 40) { self.c.debug.session == nil }
+        step("bitiş") {
+            self.check("program çıktısı", self.c.root.console.contents.contains("total=6"))
+            self.check("duran satır temizlendi", self.view?.stoppedLine == nil)
+            self.check("durum çubuğu temiz", self.c.debug.statusText.isEmpty)
+        }
+    }
+
+    // clang ile örnek programı derler
+    private func compile(_ source: String, _ output: String) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/clang")
+        p.arguments = ["-g", "-O0", file(source).path, "-o", file(output).path]
+        p.standardOutput = Pipe()
+        p.standardError = Pipe()
+        try? p.run()
+        p.waitUntilExit()
+        return p.terminationStatus == 0
     }
 }

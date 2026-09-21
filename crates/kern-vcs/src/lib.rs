@@ -62,7 +62,8 @@ impl Repo {
     }
 
     pub fn status(&self) -> Result<Vec<FileStatus>, String> {
-        let out = git(&self.root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
+        // --no-optional-locks: index'i tazelemek için yazma yapılmaz, yoksa FSEvents → status döngüsü
+        let out = git(&self.root, &["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
         let mut items = Vec::new();
         let mut parts = out.split('\0');
         while let Some(entry) = parts.next() {
@@ -102,11 +103,13 @@ impl Repo {
         let mut args = vec!["reset", "-q", "HEAD", "--"];
         args.extend(paths);
         // ilk commit öncesi HEAD yok
-        git(&self.root, &args).or_else(|_| {
-            let mut a = vec!["rm", "--cached", "-q", "--"];
-            a.extend(paths);
-            git(&self.root, &a)
-        }).map(|_| ())
+        git(&self.root, &args)
+            .or_else(|_| {
+                let mut a = vec!["rm", "--cached", "-q", "--"];
+                a.extend(paths);
+                git(&self.root, &a)
+            })
+            .map(|_| ())
     }
 
     pub fn discard(&self, paths: &[&str]) -> Result<(), String> {

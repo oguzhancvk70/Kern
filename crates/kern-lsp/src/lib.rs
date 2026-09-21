@@ -43,15 +43,18 @@ pub struct ServerSpec {
 
 // varsayılan sunucular; ilk bulunan kullanılır
 pub fn default_servers(key: &str) -> Vec<ServerSpec> {
-    let s = |c: &str, a: &[&str], i: &'static str| ServerSpec { command: c.into(), args: a.iter().map(|x| x.to_string()).collect(), install: i };
+    let s = |c: &str, a: &[&str], i: &'static str| ServerSpec {
+        command: c.into(),
+        args: a.iter().map(|x| x.to_string()).collect(),
+        install: i,
+    };
     match key {
         "rust" => vec![s("rust-analyzer", &[], "rustup component add rust-analyzer")],
         "c" => vec![s("clangd", &[], "xcode-select --install")],
         "swift" => vec![s("sourcekit-lsp", &[], "xcode-select --install")],
-        "python" => vec![
-            s("pyright-langserver", &["--stdio"], "npm install -g pyright"),
-            s("pylsp", &[], "pip3 install python-lsp-server"),
-        ],
+        "python" => {
+            vec![s("pyright-langserver", &["--stdio"], "npm install -g pyright"), s("pylsp", &[], "pip3 install python-lsp-server")]
+        }
         "typescript" => vec![s("typescript-language-server", &["--stdio"], "npm install -g typescript-language-server typescript")],
         "go" => vec![s("gopls", &[], "go install golang.org/x/tools/gopls@latest")],
         "java" => vec![s("jdtls", &[], "brew install jdtls")],
@@ -450,7 +453,10 @@ impl Manager {
         let uri = path_to_uri(path);
         let version = {
             let mut docs = self.docs.lock().unwrap();
-            let Some(d) = docs.get_mut(&uri) else { drop(docs); return self.open(path, text) };
+            let Some(d) = docs.get_mut(&uri) else {
+                drop(docs);
+                return self.open(path, text);
+            };
             d.version += 1;
             d.version
         };

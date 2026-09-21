@@ -65,11 +65,7 @@ impl Matcher {
 
     // regex modunda $1 gibi gruplar genişletilir
     pub fn replacement(&self, matched: &str, repl: &str) -> String {
-        if self.regex {
-            self.re.replace(matched, repl).into_owned()
-        } else {
-            repl.to_string()
-        }
+        if self.regex { self.re.replace(matched, repl).into_owned() } else { repl.to_string() }
     }
 }
 

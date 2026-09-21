@@ -11,6 +11,7 @@ enum MainMenu {
 
         main.addItem(submenu("Kern", [
             item("About Kern", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+            item("Check for Updates…", "checkForUpdates:"),
             .separator(),
             item("Settings…", "showSettings:", ","),
             .separator(),
@@ -122,6 +123,25 @@ enum MainMenu {
             item("Accept Current Change", "acceptCurrentChange:"),
             item("Accept Incoming Change", "acceptIncomingChange:"),
             item("Accept Both Changes", "acceptBothChanges:"),
+        ]))
+
+        let f5 = String(UnicodeScalar(NSF5FunctionKey)!)
+        main.addItem(submenu("Run", [
+            item("Start Debugging", "startDebugging:", f5, []),
+            item("Stop Debugging", "stopDebugging:", f5, [.shift]),
+            item("Restart Debugging", "restartDebugging:", f5, [.command, .shift]),
+            item("Pause", "debugPauseAction:"),
+            .separator(),
+            item("Step Over", "debugStepOver:", String(UnicodeScalar(NSF10FunctionKey)!), []),
+            item("Step Into", "debugStepInto:", String(UnicodeScalar(NSF11FunctionKey)!), []),
+            item("Step Out", "debugStepOut:", String(UnicodeScalar(NSF11FunctionKey)!), [.shift]),
+            .separator(),
+            item("Toggle Breakpoint", "toggleBreakpoint:", String(UnicodeScalar(NSF9FunctionKey)!), []),
+            item("Remove All Breakpoints", "removeAllBreakpoints:"),
+            .separator(),
+            item("Run and Debug Panel", "showDebugPanel:", "d", [.command, .shift]),
+            item("Debug Console", "toggleDebugConsole:", "y", [.command, .shift]),
+            item("Open launch.json", "openLaunchJSON:"),
         ]))
 
         main.addItem(submenu("AI", [
