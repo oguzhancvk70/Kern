@@ -178,6 +178,12 @@ mod ffi {
         fn rename(&self, path: &str, line: u32, col: u32, name: &str) -> String;
         fn formatting(&self, path: &str, tab_size: u32, insert_spaces: bool) -> String;
         fn document_symbols(&self, path: &str) -> String;
+        fn code_actions(&self, path: &str, line: u32, col: u32, end_line: u32, end_col: u32) -> String;
+        fn apply_code_action(&self, path: &str, action: &str) -> String;
+        fn workspace_symbols(&self, query: &str) -> String;
+        fn semantic_tokens(&self, path: &str) -> String;
+        fn inlay_hints(&self, path: &str, start_line: u32, end_line: u32) -> String;
+        fn folding_ranges(&self, path: &str) -> String;
         fn shutdown(&self);
     }
 
@@ -460,6 +466,30 @@ impl KernLsp {
 
     fn document_symbols(&self, path: &str) -> String {
         json_result(self.0.document_symbols(std::path::Path::new(path)))
+    }
+
+    fn code_actions(&self, path: &str, line: u32, col: u32, end_line: u32, end_col: u32) -> String {
+        json_result(self.0.code_actions(std::path::Path::new(path), line, col, end_line, end_col))
+    }
+
+    fn apply_code_action(&self, path: &str, action: &str) -> String {
+        json_result(self.0.apply_code_action(std::path::Path::new(path), action))
+    }
+
+    fn workspace_symbols(&self, query: &str) -> String {
+        json_result(self.0.workspace_symbols(query))
+    }
+
+    fn semantic_tokens(&self, path: &str) -> String {
+        json_result(self.0.semantic_tokens(std::path::Path::new(path)))
+    }
+
+    fn inlay_hints(&self, path: &str, start_line: u32, end_line: u32) -> String {
+        json_result(self.0.inlay_hints(std::path::Path::new(path), start_line, end_line))
+    }
+
+    fn folding_ranges(&self, path: &str) -> String {
+        json_result(self.0.folding_ranges(std::path::Path::new(path)))
     }
 
     fn shutdown(&self) {

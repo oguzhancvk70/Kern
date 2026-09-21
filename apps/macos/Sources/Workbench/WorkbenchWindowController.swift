@@ -212,10 +212,14 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
     private let watcher = FileWatcher()
     var language: LanguageService?
     let hover = HoverView()
+    let signature = HoverView()
     let completion = CompletionPopup()
     weak var completionView: EditorView?
     var completionRequest = 0
+    var signatureRequest = 0
     var symbolCache: [PaletteItem]?
+    var wsSymbolCache: (String, [PaletteItem])?
+    var extrasWork: DispatchWorkItem?
     var diagnosticCounts = (errors: 0, warnings: 0)
     var inlineRequest = 0
     var acceptingGhost = false
@@ -887,6 +891,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             return MainMenu.commands().filter { q.isEmpty || fuzzy($0.title.lowercased(), q) }
         }
         if raw.hasPrefix("@") { return symbolItems(String(raw.dropFirst())) }
+        if raw.hasPrefix("#") { return workspaceSymbolItems(String(raw.dropFirst())) }
         if raw.hasPrefix(":") {
             guard let view = activeTab?.view else { return [] }
             let total = Int(view.editor.line_count())
@@ -968,6 +973,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
     @objc func findPreviousMatch(_ sender: Any?) { findStep(false) }
     @objc func quickOpen(_ sender: Any?) { showPalette("") }
     @objc func goToSymbol(_ sender: Any?) { symbolCache = nil; showPalette("@") }
+    @objc func goToWorkspaceSymbol(_ sender: Any?) { wsSymbolCache = nil; showPalette("#") }
     @objc func showCommands(_ sender: Any?) { showPalette(">") }
     @objc func goToLine(_ sender: Any?) { showPalette(":") }
 

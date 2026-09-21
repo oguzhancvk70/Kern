@@ -10,6 +10,7 @@ final class SelfTest {
     private let dir: URL
     private var c: WorkbenchWindowController!
     private var wrapWas = false
+    private var actionCount: Int?
 
     init(output: String, makeWindow: @escaping (URL?) -> WorkbenchWindowController) {
         self.output = output
@@ -250,6 +251,39 @@ final class SelfTest {
             NSApp.sendAction(#selector(WorkbenchWindowController.formatDocument(_:)), to: self.c, from: nil)
         }
         wait("biçimlendirildi", timeout: 10) { self.view?.editor.line(3).toString() == "int w = 1;" }
+        step("anlamsal renk / katlama / ipucu iste") {
+            guard let t = self.c.activeTab else { return self.check("sekme", false) }
+            self.c.refreshLanguageExtras(t, delay: 0)
+        }
+        wait("anlamsal renkler", timeout: 15) { self.view?.semanticSpans.isEmpty == false }
+        wait("LSP katlama aralıkları", timeout: 10) { self.view?.lspFolds.isEmpty == false }
+        step("imza yardımı") {
+            guard let v = self.view else { return }
+            let line = v.editor.line(2).toString() as NSString
+            let p = line.range(of: "(").location
+            self.check("çağrı bulundu", p != NSNotFound)
+            v.goTo(line: 2, col: p == NSNotFound ? 0 : p + 1)
+            self.c.showSignature(v)
+        }
+        wait("imza kutusu açıldı", timeout: 10) { self.c.signature.superview != nil }
+        step("düzeltme eylemleri") {
+            guard let lang = self.c.language, let path = self.c.activeTab?.path else { return self.check("lsp", false) }
+            self.actionCount = nil
+            lang.request(path, { $0.code_actions(path, 1, 0, 1, 5) }) { obj, err in
+                if let err { self.lines.append("  code action hatası: \(err)") }
+                self.actionCount = (obj as? [Any])?.count ?? -1
+            }
+        }
+        wait("düzeltme eylemi isteği", timeout: 10) { (self.actionCount ?? -1) >= 0 }
+        step("proje sembolü ara") {
+            self.c.signature.hide()
+            NSApp.sendAction(#selector(WorkbenchWindowController.goToWorkspaceSymbol(_:)), to: self.c, from: nil)
+            self.c.paletteView?.present(text: "#area")
+        }
+        wait("proje sembolü bulundu", timeout: 15) {
+            self.c.paletteView?.items.contains { $0.title.contains("area") } == true
+        }
+        step("paleti kapat") { self.c.paletteView?.dismiss() }
         step("lsp temizle") {
             while self.view?.editor.is_dirty() == true, self.view?.editor.undo() == true {}
             self.c.hideCompletion()

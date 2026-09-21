@@ -106,11 +106,25 @@
       "Bash(git mv *)",
       "Bash(git log *)",
       "Bash(cp .claude/structure.md ~/dev/.notes/Kern/structure.md)",
-      "Bash(cd \"/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern\" && wc -l .claude/structure.md && cp .claude/structure.md ~/dev/.notes/Kern/structure.md && df -h / | tail -1)"
+      "Bash(cd \"/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern\" && wc -l .claude/structure.md && cp .claude/structure.md ~/dev/.notes/Kern/structure.md && df -h / | tail -1)",
+      "Read(//Users/base/.claude/**)",
+      "Read(//Users/base/.cargo/bin/**)",
+      "Bash(rm -f ~/.cargo/bin/rust-analyzer)",
+      "Read(//usr/bin/**)",
+      "Bash(xcrun -f clangd)",
+      "Bash(ls \"$\\(xcode-select -p\\)/Toolchains/XcodeDefault.xctoolchain/usr/bin/clangd\")",
+      "Bash(/usr/bin/clangd --version)",
+      "Bash(cd \"/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern\" && cp .claude/structure.md ~/dev/.notes/Kern/structure.md && echo \"structure.md yedeklendi \\(~/dev/.notes/Kern/\\)\" && df -h / | tail -1)",
+      "Read(//Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/**)",
+      "Read(//Users/base/dev/**)",
+      "Bash(rm -rf /tmp/claude-501/kern-dd /tmp/claude-501/kern-manual /tmp/claude-501/blametest /tmp/claude-501/kern-cfg2)",
+      "Bash(rm -rf ~/Library/Developer/Xcode/DerivedData/* '/Users/base/Library/Developer/Xcode/iOS DeviceSupport/*' ~/Library/Caches/com.apple.dt.Xcode/* ~/.cargo/registry/cache/* ~/Library/Caches/pip/*)",
+      "Bash(brew cleanup *)"
     ],
     "additionalDirectories": [
       "/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern",
-      "/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern/.claude"
+      "/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern/.claude",
+      "/Users/base/.claude"
     ]
   }
 }

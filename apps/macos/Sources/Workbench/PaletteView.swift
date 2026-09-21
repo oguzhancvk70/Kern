@@ -13,8 +13,8 @@ final class PaletteView: FlippedView, NSTextFieldDelegate {
     var provider: ((String) -> [PaletteItem])?
     var onDismiss: (() -> Void)?
 
-    let input = InputBox(placeholder: "Search files by name (append : to go to a line, > for commands)")
-    private var items: [PaletteItem] = []
+    let input = InputBox(placeholder: "Search files by name (: line, > commands, @ symbols, # project symbols)")
+    private(set) var items: [PaletteItem] = []
     private var selected = 0
     private var top = 0
     private let maxRows = 12
@@ -56,7 +56,7 @@ final class PaletteView: FlippedView, NSTextFieldDelegate {
 
     private var query: String {
         let q = input.field.stringValue
-        if q.hasPrefix(">") || q.hasPrefix(":") || q.hasPrefix("@") { return String(q.dropFirst()).trimmingCharacters(in: .whitespaces) }
+        if ">:@#".contains(q.first ?? " ") { return String(q.dropFirst()).trimmingCharacters(in: .whitespaces) }
         return q
     }
 

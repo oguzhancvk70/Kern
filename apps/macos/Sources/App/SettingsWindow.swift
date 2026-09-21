@@ -89,6 +89,8 @@ final class SettingsWindowController: NSWindowController {
         header("AI")
         row("", "ai.inlineCompletion", check("ai.inlineCompletion", "Inline completions (Claude Haiku 4.5)"))
         row("", "lsp.enabled", check("lsp.enabled", "Language servers (LSP)"))
+        row("", "editor.semanticHighlighting", check("editor.semanticHighlighting", "Semantic highlighting"))
+        row("", "editor.inlayHints", check("editor.inlayHints", "Inlay hints"))
         header("Terminal")
         row("Font size:", "terminal.fontSize", number("terminal.fontSize", 6...40))
         row("Scrollback:", "terminal.scrollback", number("terminal.scrollback", 100...1_000_000))

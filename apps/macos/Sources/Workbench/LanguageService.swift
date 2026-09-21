@@ -148,6 +148,29 @@ func hoverText(_ v: Any?) -> String {
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+// imza yardımı: etkin imza + etkin parametre
+func signatureText(_ v: Any?) -> String {
+    guard let v = v as? [String: Any], let sigs = v["signatures"] as? [[String: Any]], !sigs.isEmpty else { return "" }
+    let index = min(max(0, v["activeSignature"] as? Int ?? 0), sigs.count - 1)
+    let sig = sigs[index]
+    let label = sig["label"] as? String ?? ""
+    guard !label.isEmpty else { return "" }
+    var out = label
+    let params = sig["parameters"] as? [[String: Any]] ?? []
+    let active = sig["activeParameter"] as? Int ?? v["activeParameter"] as? Int ?? 0
+    if active >= 0, active < params.count {
+        var name = params[active]["label"] as? String
+        // [başlangıç, bitiş] biçimi: imza etiketindeki UTF-16 aralığı
+        if name == nil, let r = params[active]["label"] as? [Int], r.count == 2 {
+            let s = label as NSString
+            if r[0] >= 0, r[1] <= s.length, r[1] > r[0] { name = s.substring(with: NSRange(location: r[0], length: r[1] - r[0])) }
+        }
+        if let name { out += "\n▸ \(name)" }
+    }
+    if sigs.count > 1 { out += "   (\(index + 1)/\(sigs.count))" }
+    return out
+}
+
 // imleç çevresinde gösterilen küçük bilgi kutusu
 final class HoverView: FlippedView {
     private let label = NSTextField(wrappingLabelWithString: "")

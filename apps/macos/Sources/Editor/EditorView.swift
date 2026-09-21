@@ -77,6 +77,18 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     // dil özellikleri
     var diagnostics: [Diagnostic] = [] { didSet { needsDisplay = true } }
     var ghostText: String? { didSet { if oldValue != ghostText { needsDisplay = true } } }
+    // LSP anlamsal renkler: satır → [(başlangıç, bitiş, token)]; tree-sitter renginin üstüne biner
+    var semanticSpans: [Int: [(Int, Int, UInt32)]] = [:] { didSet { needsDisplay = true } }
+    // satır içi ipuçları: satır → [(sütun, metin)]
+    var inlayHints: [Int: [(Int, String)]] = [:] { didSet { needsDisplay = true } }
+    // LSP katlama aralıkları: başlangıç → son (tree-sitter aralıklarıyla birleşir)
+    var lspFolds: [Int: Int] = [:] {
+        didSet {
+            guard oldValue != lspFolds else { return }
+            mapDirty = true
+            needsDisplay = true
+        }
+    }
     // git: satır → 'A'/'M'/'D'; çakışma: satır → 0 işaret, 1 mevcut, 2 gelen
     var gitMarks: [Int: Character] = [:] { didSet { needsDisplay = true } }
     var conflictLines: [Int: Int] = [:] { didSet { needsDisplay = true } }
@@ -247,6 +259,12 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 folds = Dictionary(uniqueKeysWithValues: folds.map { s, e in s > pivot ? (s + delta, e + delta) : (s, e) })
             }
             mapDirty = true
+            // LSP verisi satır kaymasıyla bayatlar; yenisi gelene kadar düşür
+            if delta != 0 {
+                semanticSpans = [:]
+                inlayHints = [:]
+                lspFolds = [:]
+            }
         }
         goalX = nil
         revealFolded()
@@ -329,9 +347,18 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             let segEnd = isLast ? Int.max : segs[sub + 1]
             let shift = shaped.offset(segStart)
             let len16 = (str as NSString).length
-            widest = max(widest, shaped.width)
+            // bu parçadaki satır içi ipuçları (metni sağa iter)
+            let hints = (inlayHints[i] ?? []).filter { $0.0 >= segStart && ($0.0 < segEnd || isLast) }
+                .map { (col: min($0.0, len16), shaped: layout.shape($0.1)) }
+                .sorted { $0.col < $1.col }
+            func hintShift(_ c: Int) -> CGFloat { hints.reduce(0) { $1.col <= c ? $0 + $1.shaped.width : $0 } }
+            let hintShifter: ((Int) -> CGFloat)? = hints.isEmpty ? nil : hintShift
+            widest = max(widest, shaped.width + hintShift(len16))
             // satır içi sütunun bu parçadaki x'i
-            func colX(_ c: Int) -> CGFloat { x0 + shaped.offset(min(c, segEnd, len16)) - shift }
+            func colX(_ c: Int) -> CGFloat {
+                let c = min(c, segEnd, len16)
+                return x0 + shaped.offset(c) - shift + hintShift(c)
+            }
 
             if row == cursorRow && !hasSelection {
                 back.append(.rect(0, y, size.width, hair, theme.currentLineBorder))
@@ -400,11 +427,22 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             }
 
             let lineSpans = spans[i] ?? []
-            appendGlyphs(shaped, x: x0 - shift, baseline: y + layout.baseline, into: &text, range: segStart..<segEnd) { idx in
+            let semantic = semanticSpans[i] ?? []
+            appendGlyphs(shaped, x: x0 - shift, baseline: y + layout.baseline, into: &text, range: segStart..<segEnd,
+                         shift: hintShifter) { idx in
+                for sp in semantic where idx >= sp.0 && idx < sp.1 {
+                    return self.theme.color(for: sp.2)
+                }
                 for sp in lineSpans.reversed() where idx >= Int(sp[1]) && idx < Int(sp[2]) {
                     return self.theme.color(for: sp[3])
                 }
                 return self.theme.text
+            }
+            // ipucu metinleri: kaydırdıkları metnin soluna soluk çizilir
+            for h in hints {
+                appendGlyphs(h.shaped, x: colX(h.col) - h.shaped.width, baseline: y + layout.baseline, into: &text) { _ in
+                    self.theme.lineNumber
+                }
             }
 
             if sub == 0 {
@@ -498,12 +536,16 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         let version = editor.version()
         let cols = wrapOn ? wrapCols : 0
         guard mapDirty || version != mapVersion || cols != mapCols || lineCount != mapLines else { return }
-        if version != mapVersion || lineCount != mapLines {
+        if version != mapVersion || lineCount != mapLines || mapDirty {
             foldRanges = [:]
             if lineCount <= Self.foldMaxLines {
                 let flat = Array(editor.fold_ranges())
                 var j = 0
                 while j + 2 <= flat.count { foldRanges[Int(flat[j])] = Int(flat[j + 1]); j += 2 }
+                // LSP aralıkları: daha geniş olan kazanır
+                for (s, e) in lspFolds where s >= 0 && e < lineCount {
+                    foldRanges[s] = max(foldRanges[s] ?? 0, e)
+                }
             }
             folds = Dictionary(uniqueKeysWithValues: folds.keys.compactMap { s in foldRanges[s].map { (s, $0) } })
         }
@@ -715,13 +757,14 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     private func appendGlyphs(_ shaped: ShapedLine, x: CGFloat, baseline: CGFloat, into out: inout [Instance],
-                              clip: Bool = true, range: Range<Int>? = nil, color: (Int) -> SIMD4<Float>) {
+                              clip: Bool = true, range: Range<Int>? = nil, shift: ((Int) -> CGFloat)? = nil,
+                              color: (Int) -> SIMD4<Float>) {
         let width = clip ? textRight : drawableSize.width
         let minX = clip ? gutterWidth - layout.charWidth * 4 : -.greatestFiniteMagnitude
         let by = Float(baseline.rounded())
         for g in shaped.glyphs {
             if let range, !range.contains(g.index) { continue }
-            let pen = (x + g.x).rounded()
+            let pen = (x + g.x + (shift?(g.index) ?? 0)).rounded()
             if pen > width || pen < minX { continue }
             let entry = renderer.atlas.entry(font: g.font, glyph: g.glyph)
             if entry.size.x == 0 { continue }
@@ -739,13 +782,27 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         return CGPoint(x: p.x * scale, y: p.y * scale)
     }
 
+    // ipuçlarının ittiği x'i asıl metin x'ine çevir
+    private func unshift(_ line: Int, _ x: CGFloat, from segStart: Int, shaped: ShapedLine) -> CGFloat {
+        guard let hints = inlayHints[line], !hints.isEmpty else { return x }
+        var acc: CGFloat = 0
+        for (col, text) in hints.sorted(by: { $0.0 < $1.0 }) where col >= segStart {
+            let w = layout.shape(text).width
+            let hx = shaped.offset(col) + acc
+            if x < hx { break }
+            if x < hx + w { return hx }
+            acc += w
+        }
+        return x - acc
+    }
+
     private func position(at p: CGPoint) -> (line: Int, col: Int) {
         rebuildMapIfNeeded()
         let (line, sub) = lineAt(Int((p.y + scrollY) / layout.lineHeight))
         let shaped = shapedLine(line)
         let segs = segments(line)
         let s = segs[min(sub, segs.count - 1)]
-        var col = shaped.index(at: p.x - textLeft + scrollX + shaped.offset(s))
+        var col = shaped.index(at: unshift(line, p.x - textLeft + scrollX + shaped.offset(s), from: s, shaped: shaped))
         if sub + 1 < segs.count { col = min(col, segs[sub + 1] - 1) }
         return (line, max(s, col))
     }

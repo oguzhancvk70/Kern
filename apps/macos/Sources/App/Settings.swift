@@ -22,6 +22,8 @@ final class Settings {
         "files.insertFinalNewline": false,
         "ai.inlineCompletion": false,
         "lsp.enabled": true,
+        "editor.semanticHighlighting": true,
+        "editor.inlayHints": true,
     ]
 
     private(set) var values: [String: Any] = Settings.defaults

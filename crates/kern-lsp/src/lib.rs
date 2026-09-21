@@ -118,6 +118,43 @@ struct Inner {
     capabilities: Mutex<Value>,
     alive: AtomicBool,
     log: Mutex<Vec<String>>,
+    applied: Mutex<Vec<Value>>,
+}
+
+// LSP semantic token türü → kern-syntax token kodu
+fn semantic_kind(name: &str) -> u8 {
+    match name {
+        "namespace" | "module" => 16,
+        "type" | "class" | "struct" | "interface" | "enum" | "typeParameter" | "builtinType" => 6,
+        "parameter" | "variable" | "typeAlias" | "selfKeyword" => 7,
+        "property" | "enumMember" | "field" => 10,
+        "function" | "method" | "macro" | "event" => 5,
+        "keyword" | "modifier" => 1,
+        "comment" => 4,
+        "string" | "regexp" => 3,
+        "number" => 8,
+        "operator" | "arithmetic" | "bitwise" | "comparison" | "logical" => 11,
+        "decorator" | "attribute" | "attributeBracket" | "lifetime" => 13,
+        _ => 0,
+    }
+}
+
+// {changes} ve {documentChanges} → {uri: [TextEdit]}
+fn edit_changes(v: &Value) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    if let Some(changes) = v.get("changes").and_then(Value::as_object) {
+        out.extend(changes.clone());
+    }
+    for dc in v.get("documentChanges").and_then(Value::as_array).into_iter().flatten() {
+        if let (Some(uri), Some(edits)) = (dc.pointer("/textDocument/uri").and_then(Value::as_str), dc.get("edits")) {
+            out.insert(uri.to_string(), edits.clone());
+        }
+    }
+    out
+}
+
+fn has_cap(caps: &Value, key: &str) -> bool {
+    matches!(caps.get(key), Some(v) if !v.is_null() && *v != Value::Bool(false))
 }
 
 #[derive(Clone)]
@@ -172,6 +209,7 @@ impl Client {
             capabilities: Mutex::new(Value::Null),
             alive: AtomicBool::new(true),
             log: Mutex::new(Vec::new()),
+            applied: Mutex::new(Vec::new()),
         });
         let reader_inner = inner.clone();
         std::thread::spawn(move || {
@@ -197,7 +235,13 @@ impl Client {
                 "clientInfo": { "name": "Kern", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": {
                     "general": { "positionEncodings": ["utf-16"] },
-                    "workspace": { "workspaceFolders": true, "configuration": true, "applyEdit": false },
+                    "workspace": {
+                        "workspaceFolders": true,
+                        "configuration": true,
+                        "applyEdit": true,
+                        "executeCommand": { "dynamicRegistration": false },
+                        "symbol": { "dynamicRegistration": false }
+                    },
                     "textDocument": {
                         "synchronization": { "didSave": true, "dynamicRegistration": false },
                         "completion": {
@@ -211,7 +255,30 @@ impl Client {
                         "rename": { "prepareSupport": false },
                         "formatting": {},
                         "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
-                        "publishDiagnostics": { "relatedInformation": false }
+                        "publishDiagnostics": { "relatedInformation": false },
+                        "codeAction": {
+                            "dataSupport": true,
+                            "resolveSupport": { "properties": ["edit"] },
+                            "codeActionLiteralSupport": {
+                                "codeActionKind": {
+                                    "valueSet": ["", "quickfix", "refactor", "refactor.extract", "refactor.inline",
+                                                 "refactor.rewrite", "source", "source.organizeImports", "source.fixAll"]
+                                }
+                            }
+                        },
+                        "semanticTokens": {
+                            "requests": { "full": true, "range": false },
+                            "tokenTypes": ["namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
+                                           "parameter", "variable", "property", "enumMember", "event", "function", "method",
+                                           "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator",
+                                           "decorator"],
+                            "tokenModifiers": [],
+                            "formats": ["relative"],
+                            "overlappingTokenSupport": false,
+                            "multilineTokenSupport": false
+                        },
+                        "inlayHint": { "resolveSupport": { "properties": ["label"] } },
+                        "foldingRange": { "lineFoldingOnly": true }
                     }
                 }
             }),
@@ -244,6 +311,17 @@ impl Client {
                         Value::Array(vec![Value::Null; n])
                     }
                     "workspace/workspaceFolders" => Value::Array(vec![]),
+                    // sunucudan gelen düzenleme: kuyruğa al, uygulamayı Swift yapar
+                    "workspace/applyEdit" => {
+                        if let Some(edit) = msg.pointer("/params/edit") {
+                            let mut q = self.0.applied.lock().unwrap();
+                            q.push(edit.clone());
+                            if q.len() > 32 {
+                                q.remove(0);
+                            }
+                        }
+                        json!({ "applied": true })
+                    }
                     _ => Value::Null,
                 };
                 self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
@@ -315,6 +393,11 @@ impl Client {
 
     pub fn all_diagnostics(&self) -> HashMap<String, Value> {
         self.0.diagnostics.lock().unwrap().clone()
+    }
+
+    // sunucunun gönderdiği bekleyen workspace/applyEdit düzenlemeleri
+    pub fn take_applied(&self) -> Vec<Value> {
+        std::mem::take(&mut *self.0.applied.lock().unwrap())
     }
 
     pub fn shutdown(&self) {
@@ -552,16 +635,194 @@ impl Manager {
     // {uri: [TextEdit]}
     pub fn rename(&self, path: &Path, line: u32, col: u32, name: &str) -> Result<Value, String> {
         let r = self.position_request("textDocument/rename", path, line, col, json!({ "newName": name }))?;
-        let mut out = serde_json::Map::new();
-        if let Some(changes) = r.get("changes").and_then(Value::as_object) {
-            out.extend(changes.clone());
+        Ok(Value::Object(edit_changes(&r)))
+    }
+
+    // [{title, kind, action}] — action apply_code_action'a geri verilir
+    pub fn code_actions(&self, path: &Path, line: u32, col: u32, end_line: u32, end_col: u32) -> Result<Value, String> {
+        let (c, uri) = self.doc_client(path).ok_or("no language server")?;
+        if !has_cap(&c.capabilities(), "codeActionProvider") {
+            return Ok(Value::Array(vec![]));
         }
-        for dc in r.get("documentChanges").and_then(Value::as_array).into_iter().flatten() {
-            if let (Some(uri), Some(edits)) = (dc.pointer("/textDocument/uri").and_then(Value::as_str), dc.get("edits")) {
-                out.insert(uri.to_string(), edits.clone());
+        // seçimle kesişen tanılar bağlam olarak gider
+        let diags: Vec<Value> = c
+            .diagnostics(&uri)
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|d| {
+                        let s = d.pointer("/range/start/line").and_then(Value::as_u64).unwrap_or(0) as u32;
+                        let e = d.pointer("/range/end/line").and_then(Value::as_u64).unwrap_or(0) as u32;
+                        e >= line && s <= end_line
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": line, "character": col }, "end": { "line": end_line, "character": end_col } },
+            "context": { "diagnostics": diags, "triggerKind": 1 }
+        });
+        let r = c.request("textDocument/codeAction", params, TIMEOUT)?;
+        let out: Vec<Value> = r
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|a| {
+                let title = a.get("title").and_then(Value::as_str).or_else(|| a.pointer("/command/title").and_then(Value::as_str))?;
+                Some(json!({ "title": title, "kind": a.get("kind").cloned().unwrap_or(Value::Null), "action": a }))
+            })
+            .collect();
+        Ok(Value::Array(out))
+    }
+
+    // eylemi çöz/çalıştır → {uri: [TextEdit]}
+    pub fn apply_code_action(&self, path: &Path, action: &str) -> Result<Value, String> {
+        let (c, _) = self.doc_client(path).ok_or("no language server")?;
+        let mut a: Value = serde_json::from_str(action).map_err(|e| e.to_string())?;
+        if a.get("edit").is_none() && a.get("data").is_some() {
+            if let Ok(r) = c.request("codeAction/resolve", a.clone(), TIMEOUT) {
+                if r.is_object() {
+                    a = r;
+                }
             }
         }
-        Ok(Value::Object(out))
+        let _ = c.take_applied();
+        let mut changes = a.get("edit").map(edit_changes).unwrap_or_default();
+        // düzenleme yoksa komut çalıştır; sunucu düzenlemeyi applyEdit ile gönderir
+        let cmd = match a.get("command") {
+            Some(v) if v.is_object() => Some(v.clone()),
+            Some(v) if v.is_string() => Some(a.clone()),
+            _ => None,
+        };
+        if changes.is_empty() {
+            if let Some(cmd) = cmd {
+                let params = json!({
+                    "command": cmd.get("command").cloned().unwrap_or(Value::Null),
+                    "arguments": cmd.get("arguments").cloned().unwrap_or(json!([]))
+                });
+                c.request("workspace/executeCommand", params, Duration::from_secs(15))?;
+                for e in c.take_applied() {
+                    for (k, v) in edit_changes(&e) {
+                        changes.insert(k, v);
+                    }
+                }
+            }
+        }
+        Ok(Value::Object(changes))
+    }
+
+    // çalışan tüm sunucularda sembol ara: [{name, kind, container, uri, line, col}]
+    pub fn workspace_symbols(&self, query: &str) -> Result<Value, String> {
+        let clients: Vec<Client> = self.clients.lock().unwrap().values().flatten().cloned().collect();
+        if clients.is_empty() {
+            return Err("no language server".into());
+        }
+        let mut out = Vec::new();
+        for c in clients {
+            if !has_cap(&c.capabilities(), "workspaceSymbolProvider") {
+                continue;
+            }
+            let Ok(r) = c.request("workspace/symbol", json!({ "query": query }), TIMEOUT) else { continue };
+            for s in r.as_array().map(Vec::as_slice).unwrap_or(&[]) {
+                let Some(uri) = s.pointer("/location/uri").and_then(Value::as_str) else { continue };
+                let pos = s.pointer("/location/range/start");
+                out.push(json!({
+                    "name": s.get("name").cloned().unwrap_or(Value::Null),
+                    "kind": s.get("kind").cloned().unwrap_or(Value::Null),
+                    "container": s.get("containerName").cloned().unwrap_or(Value::Null),
+                    "uri": uri,
+                    "line": pos.and_then(|p| p.get("line")).cloned().unwrap_or(json!(0)),
+                    "col": pos.and_then(|p| p.get("character")).cloned().unwrap_or(json!(0)),
+                }));
+                if out.len() >= 300 {
+                    break;
+                }
+            }
+        }
+        Ok(Value::Array(out))
+    }
+
+    // [{line, col, len, kind}] — kind kern-syntax token kodu, 0 olanlar atlanır
+    pub fn semantic_tokens(&self, path: &Path) -> Result<Value, String> {
+        let (c, uri) = self.doc_client(path).ok_or("no language server")?;
+        let caps = c.capabilities();
+        let legend: Vec<u8> = caps
+            .pointer("/semanticTokensProvider/legend/tokenTypes")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().map(|v| semantic_kind(v.as_str().unwrap_or(""))).collect())
+            .unwrap_or_default();
+        if legend.is_empty() {
+            return Ok(Value::Array(vec![]));
+        }
+        let r = c.request("textDocument/semanticTokens/full", json!({ "textDocument": { "uri": uri } }), TIMEOUT)?;
+        let data = r.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        let (mut line, mut col) = (0u64, 0u64);
+        for t in data.chunks_exact(5) {
+            let n = |v: &Value| v.as_u64().unwrap_or(0);
+            let (dl, dc, len, ty) = (n(&t[0]), n(&t[1]), n(&t[2]), n(&t[3]) as usize);
+            line += dl;
+            col = if dl == 0 { col + dc } else { dc };
+            let kind = legend.get(ty).copied().unwrap_or(0);
+            if kind == 0 || len == 0 {
+                continue;
+            }
+            out.push(json!({ "line": line, "col": col, "len": len, "kind": kind }));
+        }
+        Ok(Value::Array(out))
+    }
+
+    // [{line, col, text}] — satır içi ipuçları
+    pub fn inlay_hints(&self, path: &Path, start_line: u32, end_line: u32) -> Result<Value, String> {
+        let (c, uri) = self.doc_client(path).ok_or("no language server")?;
+        if !has_cap(&c.capabilities(), "inlayHintProvider") {
+            return Ok(Value::Array(vec![]));
+        }
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": start_line, "character": 0 }, "end": { "line": end_line, "character": 0 } }
+        });
+        let r = c.request("textDocument/inlayHint", params, TIMEOUT)?;
+        let mut out = Vec::new();
+        for h in r.as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let label = match h.get("label") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Array(parts)) => parts.iter().filter_map(|p| p.get("value").and_then(Value::as_str)).collect(),
+                _ => String::new(),
+            };
+            let label = label.trim().to_string();
+            if label.is_empty() {
+                continue;
+            }
+            let pad = |k: &str| h.get(k).and_then(Value::as_bool).unwrap_or(false);
+            out.push(json!({
+                "line": h.pointer("/position/line").and_then(Value::as_u64).unwrap_or(0),
+                "col": h.pointer("/position/character").and_then(Value::as_u64).unwrap_or(0),
+                "text": format!("{}{}{}", if pad("paddingLeft") { " " } else { "" }, label, if pad("paddingRight") { " " } else { "" }),
+            }));
+        }
+        Ok(Value::Array(out))
+    }
+
+    // [{start, end}] — katlanabilir aralıklar (satır bazlı)
+    pub fn folding_ranges(&self, path: &Path) -> Result<Value, String> {
+        let (c, uri) = self.doc_client(path).ok_or("no language server")?;
+        if !has_cap(&c.capabilities(), "foldingRangeProvider") {
+            return Ok(Value::Array(vec![]));
+        }
+        let r = c.request("textDocument/foldingRange", json!({ "textDocument": { "uri": uri } }), TIMEOUT)?;
+        let mut out = Vec::new();
+        for f in r.as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let s = f.get("startLine").and_then(Value::as_u64).unwrap_or(0);
+            let e = f.get("endLine").and_then(Value::as_u64).unwrap_or(0);
+            if e > s {
+                out.push(json!({ "start": s, "end": e }));
+            }
+        }
+        Ok(Value::Array(out))
     }
 
     pub fn formatting(&self, path: &Path, tab_size: u32, insert_spaces: bool) -> Result<Value, String> {
@@ -644,6 +905,17 @@ mod tests {
     }
 
     #[test]
+    fn semantic_kinds_and_edits() {
+        assert_eq!(semantic_kind("function"), 5);
+        assert_eq!(semantic_kind("struct"), 6);
+        assert_eq!(semantic_kind("bogus"), 0);
+        let e = json!({ "documentChanges": [{ "textDocument": { "uri": "file:///a.c" }, "edits": [{ "newText": "x" }] }] });
+        assert!(edit_changes(&e).contains_key("file:///a.c"));
+        assert!(has_cap(&json!({ "a": true }), "a"));
+        assert!(!has_cap(&json!({ "a": false }), "a"));
+    }
+
+    #[test]
     fn framing() {
         let mut buf = Vec::new();
         write_message(&mut buf, &json!({ "a": 1 })).unwrap();
@@ -677,6 +949,50 @@ mod tests {
         assert!(items.to_string().contains("square"));
         let syms = m.document_symbols(&file).unwrap();
         assert!(syms.to_string().contains("\"main\""));
+        // katlama, anlamsal renklendirme ve düzeltme eylemleri (clangd hepsini destekler)
+        let folds = m.folding_ranges(&file).unwrap();
+        assert!(folds.as_array().is_some());
+        let sem = m.semantic_tokens(&file).unwrap();
+        assert!(sem.to_string().contains("\"kind\""));
+        let actions = m.code_actions(&file, 1, 27, 1, 27).unwrap();
+        assert!(actions.as_array().is_some());
+        let _ = m.inlay_hints(&file, 0, 2).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // rust-analyzer kuruluysa: anlamsal renk, satır içi ipucu, katlama, sembol
+    #[test]
+    fn rust_analyzer_end_to_end() {
+        if which("rust-analyzer").is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kern-ra-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"kern-ra-test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        let file = dir.join("src/main.rs");
+        let text = "fn double(x: i32) -> i32 {\n    x * 2\n}\n\nfn main() {\n    let value = double(21);\n    println!(\"{value}\");\n}\n";
+        std::fs::write(&file, text).unwrap();
+        let m = Manager::new(&dir);
+        assert!(m.open(&file, text));
+        // çalışma alanı (cargo metadata) yüklenene kadar tanım/tür çözülmez
+        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        loop {
+            let def = m.definition(&file, 5, 17).unwrap_or(Value::Null);
+            if def[0]["range"]["start"]["line"] == 0 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "rust-analyzer çalışma alanını yüklemedi");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let syms = m.document_symbols(&file).unwrap();
+        assert!(syms.to_string().contains("\"double\""));
+        let sem = m.semantic_tokens(&file).unwrap();
+        assert!(!sem.as_array().unwrap().is_empty());
+        let folds = m.folding_ranges(&file).unwrap();
+        assert!(!folds.as_array().unwrap().is_empty());
+        // `let value` satırında tür ipucu
+        let hints = m.inlay_hints(&file, 0, 8).unwrap();
+        assert!(hints.to_string().contains("i32"), "ipucu yok: {hints}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

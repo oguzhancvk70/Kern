@@ -26,11 +26,13 @@ extension WorkbenchWindowController {
     func languageOpened(_ tab: EditorTab) {
         guard !tab.path.isEmpty, tab.editor.byte_len() < 8 * 1024 * 1024, let lang = ensureLanguage() else { return }
         lang.open(tab.path, text: tab.editor.text().toString())
+        refreshLanguageExtras(tab, delay: 0.8)
     }
 
     func languageChanged(_ tab: EditorTab) {
         guard !tab.path.isEmpty, let lang = language else { return }
         lang.changed(tab.path) { [weak tab] in tab?.editor.text().toString() ?? "" }
+        refreshLanguageExtras(tab)
     }
 
     func languageSaved(_ tab: EditorTab, reopened: Bool) {
@@ -44,6 +46,59 @@ extension WorkbenchWindowController {
         let all = lang.allDiagnostics().flatMap(\.1)
         diagnosticCounts = (all.filter { $0.severity == 1 }.count, all.filter { $0.severity == 2 }.count)
         refreshUI()
+        // sunucu belgeyi işledi: renk/ipucu/katlama verisini tazele
+        if let tab = activeTab { refreshLanguageExtras(tab, delay: 0.2) }
+    }
+
+    // anlamsal renkler, satır içi ipuçları ve LSP katlama aralıkları (yalnız etkin sekme)
+    private static let extrasMaxLines = 20000
+
+    func refreshLanguageExtras(_ tab: EditorTab, delay: Double = 0.4) {
+        extrasWork?.cancel()
+        guard !tab.path.isEmpty, let lang = ensureLanguage() else { return }
+        let path = tab.path
+        let work = DispatchWorkItem { [weak tab] in
+            guard let tab, tab.view.window != nil else { return }
+            let view = tab.view
+            let lines = Int(view.editor.line_count())
+            guard lines <= Self.extrasMaxLines else { return }
+            let version = view.editor.version()
+            let fresh = { [weak view] in view?.editor.version() == version }
+            if Settings.shared.bool("editor.semanticHighlighting") {
+                lang.request(path, { $0.semantic_tokens(path) }) { [weak view] obj, _ in
+                    guard let view, fresh() else { return }
+                    var spans: [Int: [(Int, Int, UInt32)]] = [:]
+                    for t in obj as? [[String: Any]] ?? [] {
+                        guard let line = t["line"] as? Int, let col = t["col"] as? Int,
+                              let len = t["len"] as? Int, let kind = t["kind"] as? Int else { continue }
+                        spans[line, default: []].append((col, col + len, UInt32(kind)))
+                    }
+                    view.semanticSpans = spans
+                }
+            }
+            if Settings.shared.bool("editor.inlayHints") {
+                lang.request(path, { $0.inlay_hints(path, 0, UInt32(lines)) }) { [weak view] obj, _ in
+                    guard let view, fresh() else { return }
+                    var hints: [Int: [(Int, String)]] = [:]
+                    for h in obj as? [[String: Any]] ?? [] {
+                        guard let line = h["line"] as? Int, let col = h["col"] as? Int, let text = h["text"] as? String else { continue }
+                        hints[line, default: []].append((col, text))
+                    }
+                    view.inlayHints = hints
+                }
+            }
+            lang.request(path, { $0.folding_ranges(path) }) { [weak view] obj, _ in
+                guard let view, fresh() else { return }
+                var folds: [Int: Int] = [:]
+                for f in obj as? [[String: Any]] ?? [] {
+                    guard let s = f["start"] as? Int, let e = f["end"] as? Int else { continue }
+                    folds[s] = max(folds[s] ?? 0, e)
+                }
+                view.lspFolds = folds
+            }
+        }
+        extrasWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     // editör kancaları
@@ -59,6 +114,10 @@ extension WorkbenchWindowController {
             if view.ghostText != nil, !self.completion.isShown {
                 if name == "insertTab:" { return self.acceptGhost(view) }
                 view.ghostText = nil
+            }
+            if name == "cancelOperation:", self.signature.superview != nil, !self.completion.isShown {
+                self.signature.hide()
+                return true
             }
             guard self.completion.isShown, self.completionView === view else { return false }
             switch name {
@@ -107,10 +166,69 @@ extension WorkbenchWindowController {
                 guard let self, let view, self.completionRequest < req, view.window?.firstResponder === view else { return }
                 if self.wordPrefix(view).count >= 1 { self.requestCompletion(view, trigger: nil) }
             }
+        } else if ["(", ","].contains(text) {
+            hideCompletion()
+            showSignature(view)
+        } else if [")"].contains(text) {
+            hideCompletion()
+            signature.hide()
         } else if [".", ":", ">", "/", "\"", "<", "@", "#"].contains(text) {
             requestCompletion(view, trigger: text)
         } else {
             hideCompletion()
+        }
+    }
+
+    // imza yardımı (parametre ipuçları)
+
+    @objc func showParameterHints(_ sender: Any?) {
+        if let view = activeTab?.view { showSignature(view) }
+    }
+
+    func showSignature(_ view: EditorView) {
+        guard let tab = tab(for: view), !tab.path.isEmpty, let lang = ensureLanguage() else { return }
+        signatureRequest += 1
+        let req = signatureRequest
+        let path = tab.path
+        let line = UInt32(view.editor.cursor_line()), col = UInt32(view.editor.cursor_col())
+        lang.request(path, { $0.signature_help(path, line, col) }) { [weak self, weak view] obj, _ in
+            guard let self, let view, req == self.signatureRequest else { return }
+            let text = signatureText(obj)
+            guard !text.isEmpty, view.window != nil else { return self.signature.hide() }
+            self.signature.show(text, at: view.convert(view.caretPoint(), to: self.root), in: self.root)
+        }
+    }
+
+    // düzeltme eylemleri (quick fix / refactor)
+
+    @objc func showCodeActions(_ sender: Any?) {
+        guard let view = activeTab?.view, let tab = activeTab, !tab.path.isEmpty, let lang = ensureLanguage() else { return }
+        let path = tab.path
+        var start = (Int(view.editor.cursor_line()), Int(view.editor.cursor_col()))
+        var end = start
+        let sel = Array(view.editor.selections())
+        if view.editor.has_selection(), sel.count >= 4 {
+            var a = (Int(sel[0]), Int(sel[1])), b = (Int(sel[2]), Int(sel[3]))
+            if a > b { swap(&a, &b) }
+            (start, end) = (a, b)
+        }
+        let (sl, sc, el, ec) = (UInt32(start.0), UInt32(start.1), UInt32(end.0), UInt32(end.1))
+        lang.request(path, { $0.code_actions(path, sl, sc, el, ec) }) { [weak self] obj, err in
+            guard let self else { return }
+            let list = obj as? [[String: Any]] ?? []
+            guard !list.isEmpty else { return self.report(err ?? "No code actions available") }
+            let items = list.map { a in
+                PaletteItem(title: a["title"] as? String ?? "", detail: a["kind"] as? String ?? "") { [weak self] in
+                    guard let action = a["action"], let data = try? JSONSerialization.data(withJSONObject: action),
+                          let json = String(data: data, encoding: .utf8) else { return }
+                    lang.request(path, { $0.apply_code_action(path, json) }) { [weak self] obj, err in
+                        self?.applyWorkspaceEdit(obj, error: err, empty: "Code action made no changes")
+                    }
+                }
+            }
+            self.showPalette("", provider: { q in
+                q.isEmpty ? items : items.filter { $0.title.localizedCaseInsensitiveContains(q) }
+            }, placeholder: "\(items.count) code actions")
         }
     }
 
@@ -290,8 +408,8 @@ extension WorkbenchWindowController {
     }
 
     // {uri: [TextEdit]} → dosyaları aç, düzenle (kaydetmek kullanıcıya kalır)
-    func applyWorkspaceEdit(_ obj: Any?, error: String?) {
-        guard let changes = obj as? [String: Any], !changes.isEmpty else { return report(error ?? "Nothing to rename") }
+    func applyWorkspaceEdit(_ obj: Any?, error: String?, empty: String = "Nothing to rename") {
+        guard let changes = obj as? [String: Any], !changes.isEmpty else { return report(error ?? empty) }
         // aynı dosya farklı URI'lerle gelebilir (symlink): gerçek yola göre bir kez uygula
         var seen = Set<String>()
         for (uri, edits) in changes.sorted(by: { $0.key < $1.key }) {
@@ -339,6 +457,35 @@ extension WorkbenchWindowController {
             if let p = self.paletteView, p.input.field.stringValue.hasPrefix("@") { p.present(text: p.input.field.stringValue) }
         }
         return [PaletteItem(title: "Loading symbols…", run: {})]
+    }
+
+    // proje geneli semboller (#): çalışan tüm sunucularda ara
+    func workspaceSymbolItems(_ query: String) -> [PaletteItem] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        if let cache = wsSymbolCache, cache.0 == q { return cache.1 }
+        guard let lang = ensureLanguage() else { return [] }
+        guard !q.isEmpty else { return [PaletteItem(title: "Type to search symbols across the project", run: {})] }
+        wsSymbolCache = (q, [PaletteItem(title: "Searching…", run: {})])
+        lang.request("", { $0.workspace_symbols(q) }) { [weak self] obj, err in
+            guard let self else { return }
+            let items = (obj as? [[String: Any]] ?? []).compactMap { s -> PaletteItem? in
+                guard let uri = s["uri"] as? String, let url = URL(string: uri), url.isFileURL else { return nil }
+                let line = s["line"] as? Int ?? 0, col = s["col"] as? Int ?? 0
+                var rel = url.path
+                if let f = self.folder?.path, rel.hasPrefix(f + "/") { rel = String(rel.dropFirst(f.count + 1)) }
+                let container = s["container"] as? String ?? ""
+                let kind = Self.symbolKinds[s["kind"] as? Int ?? 0] ?? ""
+                return PaletteItem(title: (container.isEmpty ? "" : container + ".") + (s["name"] as? String ?? ""),
+                                   detail: "\(kind.isEmpty ? "" : kind + "  ")\(rel):\(line + 1)",
+                                   icon: FileIcons.icon(for: url.lastPathComponent, directory: false)) { [weak self] in
+                    self?.open(Location(url: url, line: line, col: col))
+                }
+            }
+            let empty = PaletteItem(title: err ?? "No symbols found", run: {})
+            self.wsSymbolCache = (q, items.isEmpty ? [empty] : items)
+            if let p = self.paletteView, p.input.field.stringValue.hasPrefix("#") { p.present(text: p.input.field.stringValue) }
+        }
+        return wsSymbolCache?.1 ?? []
     }
 
     @objc func showProblems(_ sender: Any?) {
