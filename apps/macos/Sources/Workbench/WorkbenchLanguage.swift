@@ -57,8 +57,8 @@ extension WorkbenchWindowController {
         extrasWork?.cancel()
         guard !tab.path.isEmpty, let lang = ensureLanguage() else { return }
         let path = tab.path
-        let work = DispatchWorkItem { [weak tab] in
-            guard let tab, tab.view.window != nil else { return }
+        let work = DispatchWorkItem { [weak self, weak tab] in
+            guard let self, let tab, tab.view.window != nil else { return }
             let view = tab.view
             let lines = Int(view.editor.line_count())
             guard lines <= Self.extrasMaxLines else { return }
@@ -85,6 +85,24 @@ extension WorkbenchWindowController {
                         hints[line, default: []].append((col, text))
                     }
                     view.inlayHints = hints
+                }
+            }
+            // code lens pahalı: yalnız belge sürümü değiştiyse istenir
+            if Settings.shared.bool("editor.codeLens"), self.lensVersion[path] != version {
+                self.lensVersion[path] = version
+                lang.request(path, { $0.code_lenses(path) }) { [weak self, weak view] obj, _ in
+                    guard let self, let view, fresh() else { return }
+                    var titles: [Int: [String]] = [:]
+                    var cmds: [Int: [String]] = [:]
+                    for l in obj as? [[String: Any]] ?? [] {
+                        guard let line = l["line"] as? Int, let title = l["title"] as? String, let cmd = l["command"] else { continue }
+                        guard let data = try? JSONSerialization.data(withJSONObject: ["title": title, "command": cmd]),
+                              let json = String(data: data, encoding: .utf8) else { continue }
+                        titles[line, default: []].append(title)
+                        cmds[line, default: []].append(json)
+                    }
+                    self.lensCommands[path] = cmds
+                    view.codeLenses = titles
                 }
             }
             lang.request(path, { $0.folding_ranges(path) }) { [weak view] obj, _ in
@@ -352,7 +370,7 @@ extension WorkbenchWindowController {
         return (tab.path, UInt32(view.editor.cursor_line()), UInt32(view.editor.cursor_col()))
     }
 
-    private func report(_ err: String?) {
+    func report(_ err: String?) {
         guard let err else { return }
         NSSound.beep()
         root.status.left = root.status.left + ["⚠ \(err)"]
@@ -371,6 +389,123 @@ extension WorkbenchWindowController {
 
     @objc func goToDefinition(_ sender: Any?) {
         if let view = activeTab?.view { definition(in: view) }
+    }
+
+    // tanım/uygulama/tür: tek sonuç açılır, çok sonuç palette listelenir
+    private func locations(_ name: String, _ call: @escaping (KernLsp, String, UInt32, UInt32) -> RustString) {
+        guard let view = activeTab?.view, let (path, line, col) = position(view), let lang = ensureLanguage() else { return }
+        lang.request(path, { call($0, path, line, col) }) { [weak self] obj, err in
+            guard let self else { return }
+            let locs = Location.parse(obj)
+            if locs.count == 1 { self.open(locs[0]) } else if locs.count > 1 {
+                self.showPalette("", provider: { [items = self.locationItems(locs)] _ in items }, placeholder: name)
+            } else { self.report(err ?? "No \(name.lowercased()) found") }
+        }
+    }
+
+    @objc func goToTypeDefinition(_ sender: Any?) {
+        locations("Type Definitions") { lsp, path, line, col in lsp.type_definition(path, line, col) }
+    }
+
+    @objc func goToImplementation(_ sender: Any?) {
+        locations("Implementations") { lsp, path, line, col in lsp.implementation(path, line, col) }
+    }
+
+    // peek: imlecin altında küçük liste + kaynak satırı önizlemesi
+    @objc func peekDefinition(_ sender: Any?) {
+        peekLocations("Definition") { lsp, path, line, col in lsp.definition(path, line, col) }
+    }
+
+    @objc func peekReferences(_ sender: Any?) {
+        peekLocations("References") { lsp, path, line, col in lsp.references(path, line, col) }
+    }
+
+    private func peekLocations(_ title: String, _ call: @escaping (KernLsp, String, UInt32, UInt32) -> RustString) {
+        guard let view = activeTab?.view, let (path, line, col) = position(view), let lang = ensureLanguage() else { return }
+        lang.request(path, { call($0, path, line, col) }) { [weak self, weak view] obj, err in
+            guard let self, let view else { return }
+            let locs = Location.parse(obj)
+            guard !locs.isEmpty else { return self.report(err ?? "No \(title.lowercased()) found") }
+            let rows = locs.prefix(40).map { loc in
+                PeekView.Row(file: loc.url.lastPathComponent, line: loc.line, text: Self.sourceLine(loc), open: { [weak self] in
+                    self?.peek.hide()
+                    self?.open(loc)
+                })
+            }
+            self.peek.show(title: "\(title) (\(locs.count))", rows: Array(rows), at: view.caretPoint(), in: view)
+        }
+    }
+
+    // peek satırı için dosyadan tek satır oku
+    private static func sourceLine(_ loc: Location) -> String {
+        (try? String(contentsOf: loc.url, encoding: .utf8))?
+            .split(separator: "\n", omittingEmptySubsequences: false).dropFirst(loc.line).first
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+    }
+
+    // çağrı hiyerarşisi
+    @objc func showIncomingCalls(_ sender: Any?) { callHierarchy(incoming: true) }
+    @objc func showOutgoingCalls(_ sender: Any?) { callHierarchy(incoming: false) }
+
+    private func callHierarchy(incoming: Bool) {
+        guard let view = activeTab?.view, let (path, line, col) = position(view), let lang = ensureLanguage() else { return }
+        let name = incoming ? "Callers" : "Calls"
+        lang.request(path, { $0.call_hierarchy(path, line, col, incoming) }) { [weak self] obj, err in
+            guard let self else { return }
+            let items = (obj as? [[String: Any]] ?? []).compactMap { c -> PaletteItem? in
+                guard let uri = c["uri"] as? String, let url = URL(string: uri), url.isFileURL else { return nil }
+                let range = c["range"] as? [String: Any]
+                let start = range?["start"] as? [String: Any]
+                let l = start?["line"] as? Int ?? 0, ch = start?["character"] as? Int ?? 0
+                let detail = (c["detail"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? url.lastPathComponent
+                return PaletteItem(title: c["name"] as? String ?? "?", detail: "\(detail):\(l + 1)") { [weak self] in
+                    self?.openFile(url)?.goTo(line: l, col: ch)
+                }
+            }
+            guard !items.isEmpty else { return self.report(err ?? "No \(name.lowercased()) found") }
+            self.showPalette("", provider: { q in
+                q.isEmpty ? items : items.filter { $0.title.localizedCaseInsensitiveContains(q) }
+            }, placeholder: name)
+        }
+    }
+
+    // imleçteki sembolün geçişlerini vurgula
+    func scheduleOccurrences(_ view: EditorView) {
+        occurrenceWork?.cancel()
+        guard Settings.shared.bool("editor.occurrencesHighlight"), let tab = tab(for: view), !tab.path.isEmpty,
+              Int(view.editor.line_count()) <= Self.extrasMaxLines, !view.editor.has_selection() else {
+            if !view.occurrences.isEmpty { view.occurrences = [:] }
+            return
+        }
+        let path = tab.path
+        let line = UInt32(view.editor.cursor_line()), col = UInt32(view.editor.cursor_col())
+        let work = DispatchWorkItem { [weak self, weak view] in
+            guard let self, let view, let lang = self.ensureLanguage() else { return }
+            lang.request(path, { $0.document_highlights(path, line, col) }) { [weak view] obj, _ in
+                guard let view else { return }
+                var out: [Int: [(Int, Int)]] = [:]
+                for h in obj as? [[String: Any]] ?? [] {
+                    guard let r = h["range"] as? [String: Any],
+                          let s = r["start"] as? [String: Any], let e = r["end"] as? [String: Any],
+                          let sl = s["line"] as? Int, let sc = s["character"] as? Int,
+                          let el = e["line"] as? Int, let ec = e["character"] as? Int, sl == el else { continue }
+                    out[sl, default: []].append((sc, ec))
+                }
+                view.occurrences = out
+            }
+        }
+        occurrenceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    // code lens: satır sonundaki başlığa tıklanınca komutu çalıştır
+    func runCodeLens(_ tab: EditorTab, line: Int, index: Int) {
+        guard let list = lensCommands[tab.path]?[line], index < list.count, let lang = ensureLanguage() else { return }
+        let cmd = list[index]
+        let path = tab.path
+        lang.request(path, { $0.apply_code_action(path, cmd) }) { [weak self] obj, err in
+            self?.applyWorkspaceEdit(obj, error: err, empty: "Code lens made no changes")
+        }
     }
 
     @objc func goToReferences(_ sender: Any?) {
@@ -421,13 +556,20 @@ extension WorkbenchWindowController {
     }
 
     @objc func formatDocument(_ sender: Any?) {
-        guard let view = activeTab?.view, let tab = activeTab, !tab.path.isEmpty, let lang = ensureLanguage() else { return }
+        formatDocument(sender, then: nil)
+    }
+
+    // then: biçimlendirme bitince (hata olsa da) çalışır — formatOnSave için
+    func formatDocument(_ sender: Any?, then done: (() -> Void)?) {
+        guard let view = activeTab?.view, let tab = activeTab, !tab.path.isEmpty, let lang = ensureLanguage() else { return done?() ?? () }
         let path = tab.path
         let size = UInt32(view.editor.tab_width()), spaces = view.editor.insert_spaces()
         lang.request(path, { $0.formatting(path, size, spaces) }) { [weak self, weak view] obj, err in
+            defer { done?() }
             guard let view, let edits = obj as? [Any], !edits.isEmpty,
                   let data = try? JSONSerialization.data(withJSONObject: edits), let json = String(data: data, encoding: .utf8) else {
-                return self?.report(err ?? "No formatting changes") ?? ()
+                if done == nil { self?.report(err ?? "No formatting changes") }
+                return
             }
             if view.editor.apply_edits(json) { view.changed(edited: true) }
         }

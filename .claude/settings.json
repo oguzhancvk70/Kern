@@ -120,12 +120,32 @@
       "Bash(rm -rf /tmp/claude-501/kern-dd /tmp/claude-501/kern-manual /tmp/claude-501/blametest /tmp/claude-501/kern-cfg2)",
       "Bash(rm -rf ~/Library/Developer/Xcode/DerivedData/* '/Users/base/Library/Developer/Xcode/iOS DeviceSupport/*' ~/Library/Caches/com.apple.dt.Xcode/* ~/.cargo/registry/cache/* ~/Library/Caches/pip/*)",
       "Bash(brew cleanup *)",
-      "Read(//Users/base/dev/.notes/Kern/**)"
+      "Read(//Users/base/dev/.notes/Kern/**)",
+      "Bash(gh run *)",
+      "Bash(ls -la ~/dev/.notes/Kern/ 2>&1 | head -20)",
+      "Bash(grep -n \"eksik\\\\|Eksik\\\\|TODO\\\\|yapılmadı\\\\|yok$\" structure.md)",
+      "Bash(xcodebuild -project apps/macos/Kern.xcodeproj -scheme Kern -derivedDataPath /tmp/claude-501/kern-dd build)",
+      "Bash(rm -rf /tmp/claude-501/kern-st)",
+      "Bash(mkdir -p /tmp/claude-501/kern-st)",
+      "Bash(KERN_CONFIG_DIR=/tmp/claude-501/kern-st KERN_SELFTEST=/tmp/claude-501/kern-st/report.txt /tmp/claude-501/kern-dd/Build/Products/Debug/Kern.app/Contents/MacOS/Kern)",
+      "Read(//tmp/claude-501/kern-st/**)",
+      "Read(//private/tmp/claude-501/kern-st/**)",
+      "Read(//Users/base/**)",
+      "Bash(ls ~/Library/Caches/Homebrew | head -5; du -sh ~/Library/Caches/Homebrew/downloads 2>/dev/null; rm -rf ~/Library/Caches/Homebrew/downloads/* 2>/dev/null; du -sh ~/Library/Caches/Homebrew 2>/dev/null)",
+      "Bash(rm -rf /tmp/claude-501/kern-st /private/tmp/claude-501/-Users-base-dev-Kern/*/scratchpad/todo.md)",
+      "Bash(rm -rf ~/.cargo/registry/cache/*)",
+      "Read(//Users/base/Library/Developer/Xcode/**)",
+      "Read(//Users/base/Library/Caches/fasters-iptv-build/**)",
+      "Bash(defaults domains *)",
+      "Bash(command -v npm node pnpm)",
+      "Bash(defaults write *)"
     ],
     "additionalDirectories": [
       "/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern",
       "/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern/.claude",
-      "/Users/base/.claude"
+      "/Users/base/.claude",
+      "/Users/base/Library/Developer/CoreSimulator/Caches",
+      "/Users/base/Library/Caches/Homebrew/downloads"
     ]
   }
 }

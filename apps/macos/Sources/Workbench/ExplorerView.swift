@@ -70,7 +70,9 @@ final class ExplorerView: FlippedView, NSOutlineViewDataSource, NSOutlineViewDel
     var onOpenFolder: (() -> Void)?
     var onFilesChanged: (() -> Void)?
 
-    private(set) var root: FileNode?
+    // çoklu kök: ikinci klasörden itibaren üst düzeyde klasör satırları görünür
+    private(set) var roots: [FileNode] = []
+    var root: FileNode? { roots.first }
     private let title = makeLabel("EXPLORER", size: 11, weight: .regular, color: Palette.dimText)
     private let section = makeLabel("", size: 11, weight: .bold, color: Palette.text)
     private let scroll = NSScrollView()
@@ -135,28 +137,37 @@ final class ExplorerView: FlippedView, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func setRoot(_ url: URL?) {
-        root = url.map { FileNode(url: $0, isDirectory: true) }
-        section.stringValue = url?.lastPathComponent.uppercased() ?? ""
-        section.isHidden = url == nil
-        scroll.isHidden = url == nil
-        emptyLabel.isHidden = url != nil
-        openButton.isHidden = url != nil
+        setRoots(url.map { [$0] } ?? [])
+    }
+
+    func setRoots(_ urls: [URL]) {
+        roots = urls.map { FileNode(url: $0, isDirectory: true) }
+        let empty = roots.isEmpty
+        section.stringValue = urls.count == 1 ? urls[0].lastPathComponent.uppercased() : (empty ? "" : "WORKSPACE")
+        section.isHidden = empty
+        scroll.isHidden = empty
+        emptyLabel.isHidden = !empty
+        openButton.isHidden = !empty
         outline.reloadData()
+        if roots.count > 1, let first = roots.first { outline.expandItem(first) }
     }
 
     func refresh() {
-        guard let root else { return }
-        root.reload()
+        guard !roots.isEmpty else { return }
+        roots.forEach { $0.reload() }
         outline.reloadItem(nil, reloadChildren: true)
     }
 
     func reveal(_ url: URL?) {
-        guard let url, let root else { return outline.deselectAll(nil) }
+        let target = url?.standardizedFileURL.path ?? ""
+        guard let url, let root = roots.first(where: { target.hasPrefix($0.url.standardizedFileURL.path + "/") }) ?? roots.first else {
+            return outline.deselectAll(nil)
+        }
         // üst klasörleri aç
         let rootPath = root.url.standardizedFileURL.path
-        let target = url.standardizedFileURL.path
         if target.hasPrefix(rootPath + "/") {
             var node = root
+            if roots.count > 1 { outline.expandItem(root) }
             for part in target.dropFirst(rootPath.count + 1).split(separator: "/").dropLast() {
                 guard let next = node.loadChildren().first(where: { $0.name == part && $0.isDirectory }) else { break }
                 outline.expandItem(next)
@@ -189,12 +200,15 @@ final class ExplorerView: FlippedView, NSOutlineViewDataSource, NSOutlineViewDel
     // veri kaynağı
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let node = (item as? FileNode) ?? root else { return 0 }
-        return node.loadChildren().count
+        if let node = item as? FileNode { return node.loadChildren().count }
+        if roots.count > 1 { return roots.count }
+        return root?.loadChildren().count ?? 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        ((item as? FileNode) ?? root!).loadChildren()[index]
+        if let node = item as? FileNode { return node.loadChildren()[index] }
+        if roots.count > 1 { return roots[index] }
+        return root!.loadChildren()[index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {

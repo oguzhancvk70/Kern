@@ -8,7 +8,7 @@
 - Build çıktısı `target.nosync/` (iCloud senkronlamasın diye, `.cargo/config.toml`); `build-rust.sh` ffi lib + `kern` CLI'ı derler, CLI `Kern.app/Contents/Resources/bin`'e kopyalanır
 - Kurulum: `./scripts/bootstrap.sh` (Rust lib + `xcodegen generate`) → `open apps/macos/Kern.xcodeproj` → ⌘R. Yeni Swift dosyası eklenince `xcodegen generate` şart
 - CLI ile derleme: `xcodebuild -project apps/macos/Kern.xcodeproj -scheme Kern -derivedDataPath /tmp/claude-501/kern-dd build`
-- Test: `cargo test --workspace` (55 test) + arayüz self-test: `KERN_CONFIG_DIR=<geçici> KERN_SELFTEST=<rapor.txt> Kern.app/Contents/MacOS/Kern` (125 kontrol, `Sources/App/SelfTest.swift`)
+- Test: `cargo test --workspace` (57 test) + arayüz self-test: `KERN_CONFIG_DIR=<geçici> KERN_SELFTEST=<rapor.txt> Kern.app/Contents/MacOS/Kern` (137 kontrol, `Sources/App/SelfTest.swift`)
 - Büyük dosya ölçümü: `cargo test --release -p kern-core -- --ignored --nocapture` (50 MB / 1 GB)
 - Sürüm: `./scripts/release.sh` → imza + `dist/Kern-<sürüm>.dmg`; SIGN_ID/NOTARY_PROFILE/SPARKLE_BIN verilirse notarize + appcast
 - Dil sunucuları: clangd, sourcekit-lsp kurulu; rust-analyzer kurulu değil (kurulup doğrulandı, yer kaplamasın diye kaldırıldı — testi kendini atlar)
@@ -21,19 +21,21 @@
 - `crates/kern-text` rope Buffer (ByteEdit, `marks` kayan konumlar, `version`), History, `Matcher` (regex/kelime/Türkçe İı)
 - `crates/kern-core` Document (Encoding tespit/koruma, atomik save, mtime) + Editor (görünümler: `add/activate_view`, reload, apply_text_edits, prepare_save, detect_indent, akıllı girinti) + `display.rs` (sarma/katlama)
 - `crates/kern-syntax` dil tespiti, artımlı tree-sitter, 17 token türü
-- `crates/kern-search` Workspace: dosya listesi, fuzzy quick open, paralel akışlı arama (`search_stream` → SearchJob)
+- `crates/kern-search` Workspace: dosya listesi, fuzzy quick open, paralel akışlı arama (`search_stream` → SearchJob), proje geneli değiştir (`replace_in_files`, hedef "yol" ya da "yol:satır")
 - `crates/kern-term` kendi PTY okuma döngüsü + OSC 7/133 (cwd, komut işaretleri), `integration.rs` zsh/bash kancaları, açık/koyu palet
-- `crates/kern-lsp` LSP istemcisi (Manager: dil başına sunucu, belge senkronu, istekler, yeniden başlatma) + code action (resolve/executeCommand, `applyEdit` kuyruğu), workspace/symbol, semanticTokens (sunucu legend'ı → kern-syntax token kodu), inlayHint, foldingRange
+- `crates/kern-lsp` LSP istemcisi (Manager: dil başına sunucu, belge senkronu, istekler, yeniden başlatma) + code action (resolve/executeCommand, `applyEdit` kuyruğu), workspace/symbol, semanticTokens (sunucu legend'ı → kern-syntax token kodu), inlayHint, foldingRange, typeDefinition/implementation, documentHighlight, codeLens, callHierarchy
 - `crates/kern-dap` DAP istemcisi (Session: stdio/TCP, launch.json okuma, kesme noktası kuyruğu, olaylar, stack/scope/variable/evaluate)
 - `crates/kern-ext` wasm eklentiler (manifest, izinler, fuel/bellek sınırı) — API: `docs/EXTENSION-API.md`
-- `crates/kern-vcs` git CLI sarmalayıcı (status/stage/commit/push/pull/branch/blame) + `line_changes`, `conflicts`
+- `crates/kern-vcs` git CLI sarmalayıcı (status/stage/commit/push/pull/branch/blame, fetch/stash/amend/log/commit_files/show/revert_file/tag/remote) + `line_changes`, `conflicts`, `diff_rows`
 - `crates/kern-ffi` swift-bridge köprüsü: KernEditor (Rc paylaşımlı belge + görünüm id), KernTerminal, KernWorkspace, KernSearch, KernLsp, KernExtensions, KernRepo (git; komutlar `{"ok"}`/`{"error"}` JSON)
-- `Sources/Editor/EditorView` Metal editör; görüntü satırı haritası (rowStart), tanı çizgileri, hayalet metin, LSP kancaları, anlamsal renkler (`semanticSpans`), satır içi ipuçları (`inlayHints`), `lspFolds`
+- `Sources/Editor/EditorView` Metal editör; görüntü satırı haritası (rowStart), tanı çizgileri, hayalet metin, LSP kancaları, anlamsal renkler (`semanticSpans`), satır içi ipuçları (`inlayHints`), `lspFolds`, `occurrences`, `codeLenses` (satır sonunda), sticky scroll (önbellekli), boşluk gösterimi, otomatik parantez/sarma, ⌥ sürükle = sütun seçimi
 - `Sources/Workbench` WorkbenchWindowController (EditorGroup'lar, bölme), `WorkbenchLanguage` (LSP), `WorkbenchExtensions`, FileWatcher (FSEvents), SessionStore, LanguageService (+Completion/Hover), `SourceControl` (panel, 4. sekme), `WorkbenchGit` (GitState: seri kuyruk, gutter, blame, dal paleti, çakışma çözümü)
 - `Sources/App` AppDelegate, MainMenu, Settings (JSONC + keymap), SettingsWindow, Extensions, SelfTest, Updater (Sparkle)
 - `Sources/Panels/DebugPanel` + `DebugConsole`, `Sources/Workbench/WorkbenchDebug` (DebugState: seri kuyruk, 0.2 sn yoklama, kesme noktaları UserDefaults'ta)
 - `Sources/AI` AIClient (ham HTTP+SSE, Keychain), AIAgent (araçlar+onay), ChatPanel, WorkbenchAI (hayalet tamamlama)
-- `Sources/Panels` TerminalPanel (gruplar/bölme) + TerminalView; `Sources/Theme` Theme (dark/light/eklenti) + dinamik Palette
+- `Sources/Panels` TerminalPanel (gruplar/bölme) + TerminalView (`run()` ile dış komut); `Sources/Theme` Theme (dark/light/eklenti) + dinamik Palette
+- Yeni Workbench dosyaları: `PeekView` (tanım/referans kutusu), `DiffWindow` (yan yana diff), `EditorConfig` (.editorconfig), `WorkbenchTasks` (tasks.json → terminal), `MarkdownPreview`, `App/RecentFolders` (File ▸ Open Recent)
+- Çoklu kök: `extraFolders`/`extraWorkspaces` (gezgin, arama, hızlı açma); LSP ve git ana klasöre bağlı
 - `Resources/extensions` paket içi eklentiler (text-tools wasm, solarized tema, snippets)
 
 ## 4 Tuzaklar  <!-- tekrar eden hatalar -->
@@ -57,20 +59,34 @@
 - `rustup component remove <araç>` shim'i `~/.cargo/bin`'de bırakır; `which` onu bulup çalıştırır → "server exited". Bileşeni kaldırınca shim de silinir.
 - Satır içi ipucu metni satırı sağa iter: `colX`/`appendGlyphs` kaydırması ile tıklama telafisi (`unshift`) hep birlikte güncellenir.
 - 2 MB üstü dosyada ilk tree-sitter parse arka planda (50 MB'ta 3 sn); bitince `syntax_pending()` ile yeniden çizilir, 50 MB üstü renklendirilmez.
+- Çizim döngüsünde kare başına iş yapma: sticky scroll satırları (üst satır+sürüm anahtarıyla) önbelleğe alınır, `shape()` döngü dışına çıkarılır — aksi halde uzun dosyada gözle görülür yavaşlama.
+- `codeLens/resolve` lens başına ayrı gidiş-dönüş: yalnız belge sürümü değişince iste, 60'tan fazlaysa resolve etme. Aksi halde sunucu meşgul kalır, tamamlama/tanı gecikir.
+- SelfTest'te yeni dosya açan adım eklersen "oturum N sekme" kontrolünü güncelle; SelfTest UserDefaults'u paylaşır (lastFolder/recentFolders yazımı KERN_SELFTEST'te atlanır).
+- Tanı yalnız LSP'den gelir: sunucu yoksa dosya hatalı olsa da hiçbir işaret çıkmaz. Kurulu olanlar clangd + sourcekit-lsp; diğer diller için sunucu kurulmalı.
+- `lsp.servers` içinde `./…` yolu proje köküne göre çözülür (uygulamanın cwd'si `/`, PATH araması işe yaramaz).
 
 ## 5 Durum  <!-- ne çalışıyor, ne yarım -->
 29 maddelik iş listesinin tamamı bitti ve testli (cargo 53, SelfTest 119). 23–29: DAP hata ayıklama, erişilebilirlik + IME, FFI testleri, CI, README/LICENSE, büyük dosya (50 MB arka plan renklendirme, 1 GB ölçümü), dağıtım (entitlements + hardened runtime + DMG + Sparkle). 1–22: atomik kaydetme, kodlamalar, FSEvents, oturum, editör bölme, word wrap, katlama, ayarlar/keymap, açık tema, akıllı girinti, regex/kelime/Türkçe arama, akışlı proje araması, çoklu/bölünmüş terminal, OSC 7/133, tıklanabilir yollar, Option-as-Meta, `kern` CLI, LSP (clangd ile doğrulandı), AI (Chat/Agent/inline, sahte akışla test), wasm eklentiler, Git (panel/gutter/blame/dal/çakışma). 22'ye kadar commit edilmedi (commit'ler kullanıcıda).
 
 29 maddenin tamamı commit'li (`70d7f05`). Üstüne LSP eksikleri kapatıldı: imza yardımı (⇧⌘Space, `(`/`,` ile otomatik), quick fix (⌘.), proje sembolü (`#` / ⌘T), anlamsal renkler + satır içi ipuçları (ayarlar: `editor.semanticHighlighting`, `editor.inlayHints`), LSP katlama aralıkları. rust-analyzer ile uçtan uca doğrulandı.
 
-LSP eksikleri `907c747` ile commit'li. `.claude/structure.md` artık gitignore'da değil, repoda taşınıyor (klonda hazır gelsin diye). Çalışma alanı iCloud'dan `~/dev/Kern`'e taşındı; notlar ayrıca `~/dev/.notes/Kern/` altında yedekli.
+LSP eksikleri `907c747` ile commit'li. `.claude/structure.md` artık gitignore'da değil, repoda taşınıyor. Çalışma alanı `~/dev/Kern`; notlar ayrıca `~/dev/.notes/Kern/` altında yedekli.
 
-**Kaldığımız yer:** Kod tarafında açık iş yok. Kullanıcıda bekleyen doğrulama: `cargo test --workspace` + SelfTest (LSP eklemelerinden sonra tam tur atılmadı). Sapmalar: AI Swift'te (Rust yerine), eklenti ABI'si core-wasm (WIT değil), git CLI (gix değil), Sparkle anahtarı (`SUPublicEDKey`) boş → güncelleme kapalı.
+2026-09-22'de 15 maddelik eksik listesinin tamamı yazıldı: proje geneli değiştir, diff penceresi, otomatik parantez/sarma, files.autoSave, sekme sürükle-bırak, typeDefinition/implementation/peek/documentHighlight/codeLens/callHierarchy, formatOnSave, git (fetch/stash/amend/log/revert/tag/remote), tasks.json, .editorconfig, markdown önizleme, sütun seçimi, sticky scroll, renderWhitespace, zen modu + panel büyüt, son klasörler, çoklu kök. Yeni ayarlar: `editor.autoClosingBrackets/autoSurround/formatOnSave/occurrencesHighlight/codeLens/stickyScroll/renderWhitespace`, `files.autoSave(+Delay)`, `files.useEditorConfig`. Hepsi test edildi (cargo 57, SelfTest 137) ama **commit edilmedi**.
+
+**Kaldığımız yer:** Tüm değişiklikler çalışma kopyasında, commit kullanıcıda (cargo 57 + SelfTest 137 geçti; son durum çubuğu/LSP düzeltmelerinden sonra yalnız derleme yapıldı, tam tur atılmadı). Kullanıcıda bekleyen iki doğrulama: (1) uzun dosyalardaki yavaşlık — code lens/sticky scroll/boşluk çizimi optimize edildi, hâlâ ağırsa `editor.stickyScroll` + `editor.codeLens` kapatılıp karşılaştırılacak, fark yoksa sorun temel çizim yolunda; (2) TS projesinde tanıların gelmesi — yeni derleme açılıp `.ts` dosyasında hata yapılacak, durum çubuğu "{ } LSP" göstermeli. Sapmalar: AI Swift'te (Rust yerine), eklenti ABI'si core-wasm (WIT değil), git CLI (gix değil), Sparkle anahtarı (`SUPublicEDKey`) boş → güncelleme kapalı.
 
 ## 6 Oturum notları  <!-- en fazla 3 oturum, en yeni üstte -->
 ### 2026-09-22
 - Karar: `structure.md` repoya alındı (gitignore'dan çıktı) — global kural 16'nın istisnası, klasör silinince kaybolmasın diye.
 - Depo `~/dev/Kern`'e klonlandı, iCloud kopyası silindi. Bundan sonra çalışma dizini `~/dev/Kern`.
+- CI kırmızıydı: (1) rust-analyzer testi `which` ile atlanıyordu ama rustup shim'i runner'da var → guard `--version` ile gerçek çalışmayı sınıyor; (2) SelfTest `e.c` tek satırlık fonksiyonlardan oluşuyordu, clangd katlama aralığı dönmüyordu → dosyaya çok satırlı fonksiyon eklendi.
+- 15 eksik maddesi tek oturumda kapatıldı (bkz. 5 Durum).
+- Karar: code lens VS Code'daki gibi satırın üstüne değil **satır sonuna** çiziliyor — üste çizmek görüntü satırı haritasını (rowStart) bozuyor.
+- Karar: peek ayrı pencere değil, editörün içinde küçük liste (`PeekView`); diff ise ayrı pencere (`DiffWindow`) — editör alanını bölmemek için.
+- Çoklu kökte ek klasör sonuçları "klasörAdı/yol" ön ekiyle taşınır; `resolveSearchPath` ile gerçek dosyaya çevrilir.
+- "Hata görünmüyor" şikâyeti → dil sunucusu eksikliğiydi. Karar: sessiz kalmak yerine durum çubuğu uyarısı tıklanabilir ("⚠ No Language Server — click to install" kurulum komutunu terminale yazar; "⚠ LSP Error — click for details").
+- Kullanıcının TS monorepo'su (iCloud/Desktop/Projects/Muhasebe Programı): sunucu **projeye** kuruldu (`pnpm add -Dw typescript-language-server typescript`), `.kern/settings.json` içinde `lsp.servers.typescript` göreli yolla tanımlı — global kurulum istenmedi.
 
 ### 2026-09-21
 - LSP eksik listesi çıkarıldı ve 6 madde kapatıldı; karar: inlay hint "satır sonuna yaz" kolaycılığı yerine gerçek yerine çizilir (glyph kaydırma + tıklama telafisi).

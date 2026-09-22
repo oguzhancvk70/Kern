@@ -24,6 +24,16 @@ final class Settings {
         "lsp.enabled": true,
         "editor.semanticHighlighting": true,
         "editor.inlayHints": true,
+        "editor.autoClosingBrackets": true,
+        "editor.autoSurround": true,
+        "editor.formatOnSave": false,
+        "editor.occurrencesHighlight": true,
+        "editor.codeLens": true,
+        "editor.stickyScroll": true,
+        "editor.renderWhitespace": "none", // none | boundary | all
+        "files.autoSave": "off", // off | afterDelay | onFocusChange
+        "files.autoSaveDelay": 1000,
+        "files.useEditorConfig": true,
     ]
 
     private(set) var values: [String: Any] = Settings.defaults

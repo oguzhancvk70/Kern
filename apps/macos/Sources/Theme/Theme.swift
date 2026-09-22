@@ -23,6 +23,7 @@ struct Theme {
     var gitDeleted = rgb(0xF85149)
     var conflictCurrent = rgb(0x2EA043, 0.18)
     var conflictIncoming = rgb(0x0078D4, 0.18)
+    var stickyBackground = rgb(0x1F1F1F)
     var breakpoint = rgb(0xE51400)
     var stoppedArrow = rgb(0xFFCC00)
     var stoppedLine = rgb(0xFFCC00, 0.16)
@@ -63,7 +64,7 @@ struct Theme {
         lineNumber: rgb(0x6E7681), activeLineNumber: rgb(0x171184),
         currentLineBorder: rgb(0xEEEEEE), selection: rgb(0xADD6FF), inactiveSelection: rgb(0xE5EBF1),
         cursor: rgb(0x000000), indentGuide: rgb(0xD3D3D3), bracketMatch: rgb(0x0064C8, 0.18),
-        findMatch: rgb(0xF6B94D, 0.6), scrollbar: rgb(0x646464, 0.35),
+        findMatch: rgb(0xF6B94D, 0.6), scrollbar: rgb(0x646464, 0.35), stickyBackground: rgb(0xF3F3F3),
         syntax: [
             rgb(0x3B3B3B),  // none
             rgb(0x0000FF),  // keyword
@@ -109,9 +110,10 @@ struct Theme {
             ("background", \.background), ("text", \.text), ("lineNumber", \.lineNumber), ("activeLineNumber", \.activeLineNumber),
             ("currentLineBorder", \.currentLineBorder), ("selection", \.selection), ("inactiveSelection", \.inactiveSelection),
             ("cursor", \.cursor), ("indentGuide", \.indentGuide), ("bracketMatch", \.bracketMatch), ("findMatch", \.findMatch),
-            ("scrollbar", \.scrollbar),
+            ("scrollbar", \.scrollbar), ("stickyBackground", \.stickyBackground),
         ]
         for (k, path) in map { if let c = color(colors[k]) { t[keyPath: path] = c } }
+        if color(colors["stickyBackground"]) == nil, let bg = color(colors["background"]) { t.stickyBackground = bg }
         if let tokens = json["tokens"] as? [String: Any] {
             for (i, n) in tokenNames.enumerated() where i < t.syntax.count { if let c = color(tokens[n]) { t.syntax[i] = c } }
         }

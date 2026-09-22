@@ -104,6 +104,74 @@ impl Workspace {
         Ok(job)
     }
 
+    // proje geneli değiştir; hedef "yol" (tüm satırlar) ya da "yol:satır" olabilir
+    // dönüş: (değişen dosya sayısı, değiştirilen eşleşme sayısı)
+    pub fn replace_in_files(&self, query: &str, flags: u8, repl: &str, targets: &[String]) -> Result<(usize, usize), String> {
+        let m = Matcher::new(query, flags)?;
+        let mut byfile: Vec<(String, Vec<usize>)> = Vec::new();
+        for t in targets {
+            let (path, line) = match t.rsplit_once(':').and_then(|(p, l)| l.parse::<usize>().ok().map(|n| (p, Some(n)))) {
+                Some((p, n)) => (p.to_string(), n),
+                None => (t.clone(), None),
+            };
+            match byfile.iter_mut().find(|(p, _)| *p == path) {
+                Some((_, lines)) => {
+                    if let Some(n) = line {
+                        lines.push(n);
+                    }
+                }
+                None => byfile.push((path, line.into_iter().collect())),
+            }
+        }
+        let (mut files, mut count) = (0, 0);
+        for (rel, lines) in byfile {
+            let full = self.root.join(&rel);
+            let Ok(bytes) = std::fs::read(&full) else { continue };
+            if bytes[..bytes.len().min(8000)].contains(&0) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let mut out = String::with_capacity(text.len());
+            let mut hits = 0;
+            for (i, line) in text.split_inclusive('\n').enumerate() {
+                let (body, nl) = match line.strip_suffix('\n') {
+                    Some(b) => (b, "\n"),
+                    None => (line, ""),
+                };
+                let (body, cr) = match body.strip_suffix('\r') {
+                    Some(b) => (b, "\r"),
+                    None => (body, ""),
+                };
+                if !lines.is_empty() && !lines.contains(&i) {
+                    out.push_str(body);
+                    out.push_str(cr);
+                    out.push_str(nl);
+                    continue;
+                }
+                let ranges = m.find(body);
+                let mut last = 0;
+                for r in ranges {
+                    out.push_str(&body[last..r.start]);
+                    out.push_str(&m.replacement(&body[r.clone()], repl));
+                    last = r.end;
+                    hits += 1;
+                }
+                out.push_str(&body[last..]);
+                out.push_str(cr);
+                out.push_str(nl);
+            }
+            if hits > 0 && out != text {
+                // atomik yazım: yan dosyaya yaz, üstüne taşı
+                let name = full.file_name().map_or_else(|| "kern".into(), |n| n.to_string_lossy().into_owned());
+                let tmp = full.with_file_name(format!(".{name}.kern-tmp"));
+                std::fs::write(&tmp, out.as_bytes()).and_then(|_| std::fs::rename(&tmp, &full)).map_err(|e| e.to_string())?;
+                files += 1;
+                count += hits;
+            }
+        }
+        Ok((files, count))
+    }
+
     // eşzamanlı sarmalayıcı (testler ve CLI için)
     pub fn search(&self, query: &str, flags: u8, limit: usize) -> Vec<Hit> {
         let Ok(job) = self.search_stream(query, flags, limit) else { return Vec::new() };
@@ -213,6 +281,28 @@ mod tests {
         let b = fuzzy_score("e/d/i/t/x.rs", &q).unwrap();
         assert!(a > b);
         assert!(fuzzy_score("abc", &q).is_none());
+    }
+
+    #[test]
+    fn replaces_across_files() {
+        let dir = std::env::temp_dir().join(format!("kern-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "foo bar\nfoo\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "baz foo\n").unwrap();
+        let w = Workspace::open(&dir);
+        let (files, n) = w.replace_in_files("foo", FIND_CASE, "qux", &["a.txt".into(), "b.txt".into()]).unwrap();
+        assert_eq!((files, n), (2, 3));
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "qux bar\nqux\n");
+        // yalnız belirtilen satır
+        std::fs::write(dir.join("a.txt"), "foo\nfoo\n").unwrap();
+        let (_, n) = w.replace_in_files("foo", FIND_CASE, "x", &["a.txt:1".into()]).unwrap();
+        assert_eq!((n, std::fs::read_to_string(dir.join("a.txt")).unwrap()), (1, "foo\nx\n".to_string()));
+        // regex grubu
+        std::fs::write(dir.join("b.txt"), "ab12\n").unwrap();
+        w.replace_in_files(r"([a-z]+)(\d+)", FIND_REGEX | FIND_CASE, "$2-$1", &["b.txt".into()]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "12-ab\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

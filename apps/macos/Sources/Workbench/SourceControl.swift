@@ -85,6 +85,8 @@ private final class SCMCell: NSTableCellView {
 final class SourceControlPanel: FlippedView, NSTextFieldDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
     var onCommit: ((String) -> Void)?
     var onOpen: ((SCMFile) -> Void)?
+    var onDiff: ((SCMFile) -> Void)?
+    var onHistory: ((SCMFile) -> Void)?
     var onStage: (([String]) -> Void)?
     var onUnstage: (([String]) -> Void)?
     var onDiscard: (([String]) -> Void)?
@@ -336,7 +338,11 @@ extension SourceControlPanel: NSMenuDelegate {
             i.representedObject = run
             menu.addItem(i)
         }
-        if let f = item as? SCMFile, f.letter != "D" { add("Open File") { [weak self] in self?.onOpen?(f) } }
+        if let f = item as? SCMFile, f.letter != "D" {
+            add("Open File") { [weak self] in self?.onOpen?(f) }
+            add("Compare with HEAD") { [weak self] in self?.onDiff?(f) }
+            add("File History") { [weak self] in self?.onHistory?(f) }
+        }
         let p = paths(item)
         switch kind(item) {
         case .staged: add("Unstage Changes") { [weak self] in self?.onUnstage?(p) }

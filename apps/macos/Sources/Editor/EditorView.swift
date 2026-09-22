@@ -89,6 +89,30 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             needsDisplay = true
         }
     }
+    // imleçteki sembolün geçişleri: satır → [(başlangıç, bitiş)]
+    var occurrences: [Int: [(Int, Int)]] = [:] { didSet { needsDisplay = true } }
+    // code lens: satır → başlıklar (satır sonunda soluk, tıklanabilir)
+    var codeLenses: [Int: [String]] = [:] { didSet { needsDisplay = true } }
+    var onCodeLens: ((Int, Int) -> Void)?
+    private var lensHits: [(rect: NSRect, line: Int, index: Int)] = []
+    private var stickyHits: [(rect: NSRect, line: Int)] = []
+    private struct StickyKey: Equatable {
+        var top = -1
+        var version: UInt64 = .max
+        var folds = -1
+    }
+    private var stickyKey = StickyKey()
+    private var stickyRows: [(line: Int, shaped: ShapedLine, spans: [[UInt32]])] = []
+    private var boxAnchor: (line: Int, col: Int)?
+
+    enum Whitespace { case none, boundary, all }
+    private var whitespaceMode: Whitespace {
+        switch Settings.shared.string("editor.renderWhitespace") {
+        case "all": return .all
+        case "boundary": return .boundary
+        default: return .none
+        }
+    }
     // git: satır → 'A'/'M'/'D'; çakışma: satır → 0 işaret, 1 mevcut, 2 gelen
     var gitMarks: [Int: Character] = [:] { didSet { needsDisplay = true } }
     var conflictLines: [Int: Int] = [:] { didSet { needsDisplay = true } }
@@ -312,6 +336,7 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             k += 4
         }
 
+        lensHits.removeAll()
         var back: [Instance] = []
         var text: [Instance] = []
         var front: [Instance] = [.rect(0, 0, gutter, size.height, theme.background)]
@@ -330,6 +355,9 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             Array(editor.find_in_lines(findQuery, findFlags, UInt(first), UInt(last))), stride: 3)
         let bracket = Array(editor.matching_bracket())
         let hair = max(1, scale.rounded())
+        let wsMode = whitespaceMode
+        let wsSpace = wsMode == .none ? nil : layout.shape("·")
+        let wsTab = wsMode == .none ? nil : layout.shape("→")
         var guideIndent = 0
         var shapedCache: [Int: (String, ShapedLine, [Int])] = [:]
         let cursorRow = rowOf(line: cursorLine, col: cursorCol)
@@ -391,6 +419,11 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 let a = colX(max(ms, segStart)), b = colX(me)
                 back.append(.rect(a, y, b - a, lh, theme.findMatch))
             }
+            // aynı sembolün diğer geçişleri
+            for (os, oe) in occurrences[i] ?? [] where oe > segStart && os < segEnd {
+                let a = colX(max(os, segStart)), b = colX(oe)
+                if b > a { back.append(.rect(a, y, b - a, lh, theme.bracketMatch)) }
+            }
             for (s, e) in ranges where i >= s.0 && i <= e.0 {
                 let lo = max(i == s.0 ? s.1 : 0, segStart)
                 let hiCol = i == e.0 ? e.1 : Int.max
@@ -443,6 +476,30 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 appendGlyphs(h.shaped, x: colX(h.col) - h.shaped.width, baseline: y + layout.baseline, into: &text) { _ in
                     self.theme.lineNumber
                 }
+            }
+            // görünür boşluklar
+            if wsMode != .none {
+                let ns = str as NSString
+                let lead = str.prefix(while: { $0 == " " || $0 == "\t" }).count
+                let trailStart = len16 - str.reversed().prefix(while: { $0 == " " || $0 == "\t" }).count
+                for c in max(segStart, 0)..<min(segEnd, len16) {
+                    let ch = ns.character(at: c)
+                    guard ch == 32 || ch == 9 else { continue }
+                    if wsMode == .boundary && c >= lead && c < trailStart { continue }
+                    guard let mark = ch == 9 ? wsTab : wsSpace else { continue }
+                    appendGlyphs(mark, x: colX(c), baseline: y + layout.baseline, into: &text) { _ in self.theme.indentGuide }
+                }
+            }
+            // code lens: satır sonunda soluk, tıklanabilir
+            if isLast, let titles = codeLenses[i], !titles.isEmpty {
+                var lx = colX(len16) + layout.charWidth * 2
+                for (n, title) in titles.enumerated() {
+                    let g = layout.shape(title)
+                    appendGlyphs(g, x: lx, baseline: y + layout.baseline, into: &text) { _ in self.theme.lineNumber }
+                    lensHits.append((NSRect(x: lx, y: y, width: g.width, height: lh), i, n))
+                    lx += g.width + layout.charWidth * 2
+                }
+                widest = max(widest, lx - x0)
             }
 
             if sub == 0 {
@@ -499,6 +556,42 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 }
             }
         }
+        // sticky scroll: ekranın üstünde kalan kapsayıcı satırlar
+        stickyHits.removeAll()
+        if Settings.shared.bool("editor.stickyScroll"), firstRow > 0 {
+            // kapsayıcı satırlar yalnız üst satır/sürüm değişince hesaplanır (her karede değil)
+            let topLine = lineAt(firstRow).line
+            let key = StickyKey(top: topLine, version: editor.version(), folds: foldRanges.count)
+            if stickyKey != key {
+                stickyKey = key
+                var chain = foldRanges.filter { $0.key < topLine && $0.value >= topLine }.map(\.key).sorted()
+                if chain.count > 3 { chain = Array(chain.suffix(3)) }
+                stickyRows = chain.map { line in
+                    let shaped = layout.shape(editor.line(UInt(line)).toString())
+                    let spans = groupByLine(Array(editor.highlights(UInt(line), UInt(line))), stride: 4)[line] ?? []
+                    return (line, shaped, spans)
+                }
+            }
+            for (n, row) in stickyRows.enumerated() {
+                let y = CGFloat(n) * lh
+                front.append(.rect(0, y, size.width - minimapWidth, lh, theme.stickyBackground))
+                let spans = row.spans
+                appendGlyphs(row.shaped, x: textLeft - scrollX, baseline: y + layout.baseline, into: &front) { idx in
+                    for s in spans.reversed() where idx >= Int(s[1]) && idx < Int(s[2]) {
+                        return self.theme.color(for: s[3])
+                    }
+                    return self.theme.text
+                }
+                let number = layout.shape(String(row.line + 1))
+                appendGlyphs(number, x: gutter - layout.charWidth * 2.6 - number.width, baseline: y + layout.baseline,
+                             into: &front, clip: false) { _ in self.theme.lineNumber }
+                stickyHits.append((NSRect(x: 0, y: y, width: size.width - minimapWidth, height: lh), row.line))
+            }
+            if !stickyRows.isEmpty {
+                front.append(.rect(0, CGFloat(stickyRows.count) * lh, size.width - minimapWidth, hair, theme.currentLineBorder))
+            }
+        }
+
         contentWidth = wrapOn ? 0 : widest
         appendMinimap(first: first, last: last, into: &front)
         appendScrollbar(into: &front)
@@ -830,6 +923,14 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             scrollToThumb(p, grab: grab)
             return
         }
+        // sticky satır: o satıra git; code lens: komutu çalıştır
+        if let hit = stickyHits.first(where: { NSPointInRect(NSPoint(x: p.x, y: p.y), $0.rect) }) {
+            goTo(line: hit.line, col: 0)
+            return
+        }
+        if let hit = lensHits.first(where: { NSPointInRect(NSPoint(x: p.x, y: p.y), $0.rect) }), let run = onCodeLens {
+            return run(hit.line, hit.index)
+        }
         inputContext?.discardMarkedText()
         markedText = ""
         let (line, col) = position(at: p)
@@ -851,6 +952,8 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         case 3...: editor.select_line(UInt(line))
         default:
             if event.modifierFlags.contains(.option) {
+                // ⌥ sürüklenirse sütun seçimi, sürüklenmezse imleç ekle
+                boxAnchor = (line, col)
                 editor.add_cursor(UInt(line), UInt(col))
             } else {
                 editor.click(UInt(line), UInt(col), event.modifierFlags.contains(.shift))
@@ -866,13 +969,18 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             return scrollToThumb(p, grab: grab)
         }
         let (line, col) = position(at: p)
-        editor.click(UInt(line), UInt(col), true)
+        if let a = boxAnchor, event.modifierFlags.contains(.option) {
+            editor.select_box(UInt(a.line), UInt(a.col), UInt(line), UInt(col))
+        } else {
+            editor.click(UInt(line), UInt(col), true)
+        }
         changed(edited: false)
     }
 
     override func mouseUp(with event: NSEvent) {
         draggingScrollbar = nil
         draggingMinimap = false
+        boxAnchor = nil
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -971,9 +1079,52 @@ final class EditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     // NSTextInputClient — koordinat alanı: imlecin bulunduğu satırın UTF-16 ofsetleri
 
+    // otomatik kapatılan çiftler
+    private static let pairs: [Character: Character] = ["(": ")", "[": "]", "{": "}", "\"": "\"", "'": "'", "`": "`"]
+
+    private func autoPair(_ text: String) -> Bool {
+        guard text.count == 1, let ch = text.first else { return false }
+        let s = Settings.shared
+        let line = Int(editor.cursor_line()), col = Int(editor.cursor_col())
+        let str = editor.line(UInt(line)).toString() as NSString
+        let next: Character? = col < str.length ? Character(UnicodeScalar(str.character(at: col)) ?? " ") : nil
+        // seçimi sar
+        if editor.has_selection(), s.bool("editor.autoSurround"), let close = Self.pairs[ch] {
+            let sel = editor.selected_text().toString()
+            guard !sel.contains("\n") else { return false }
+            let a = (Int(editor.anchor_line()), Int(editor.anchor_col())), b = (line, col)
+            let start = min(a.1, b.1)
+            editor.insert_text("\(ch)\(sel)\(close)")
+            editor.select_range(UInt(line), UInt(start + 1), UInt((sel as NSString).length))
+            changed(edited: true)
+            return true
+        }
+        guard !editor.has_selection(), s.bool("editor.autoClosingBrackets") else { return false }
+        // kapanışın üstüne yazma
+        if let n = next, n == ch, Self.pairs.values.contains(ch) || Self.pairs[ch] == ch {
+            editor.click(UInt(line), UInt(col + 1), false)
+            changed(edited: false)
+            return true
+        }
+        guard let close = Self.pairs[ch] else { return false }
+        // tırnaklarda: sözcüğün ortasında açma
+        let isQuote = close == ch
+        if let n = next, n.isLetter || n.isNumber || (isQuote && n == ch) { return false }
+        if isQuote, col > 0 {
+            let prev = Character(UnicodeScalar(str.character(at: col - 1)) ?? " ")
+            if prev.isLetter || prev.isNumber || prev == ch { return false }
+        }
+        editor.type_text("\(ch)\(close)")
+        editor.click(UInt(line), UInt(col + 1), false)
+        changed(edited: true)
+        onTyped?(text)
+        return true
+    }
+
     func insertText(_ string: Any, replacementRange: NSRange) {
         let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
         markedText = ""
+        if replacementRange.location == NSNotFound, autoPair(text) { return }
         if replacementRange.location != NSNotFound {
             let line = editor.cursor_line()
             editor.click(line, UInt(replacementRange.location), false)

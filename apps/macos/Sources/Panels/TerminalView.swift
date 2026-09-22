@@ -281,6 +281,11 @@ final class TerminalView: MTKView, MTKViewDelegate {
         terminal?.write_text(s)
     }
 
+    // dışarıdan komut çalıştır (görev çalıştırıcı)
+    func run(_ command: String) {
+        send(command + "\n")
+    }
+
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags
         if flags.contains(.command) { return super.keyDown(with: event) }

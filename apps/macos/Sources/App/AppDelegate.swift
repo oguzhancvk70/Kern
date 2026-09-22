@@ -112,6 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return c
     }
 
+    // menüden/son klasörlerden açma
+    func openURL(_ url: URL) { open(url) }
+
     private func open(_ url: URL) {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }

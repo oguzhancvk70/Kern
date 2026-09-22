@@ -159,6 +159,17 @@ final class SplitHandle: NSView {
 final class StatusBarView: FlippedView {
     var left: [String] = [] { didSet { needsDisplay = true } }
     var right: [String] = [] { didSet { needsDisplay = true } }
+    var onClickItem: ((String) -> Void)?
+    private var hits: [(rect: NSRect, text: String)] = []
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if let hit = hits.first(where: { NSPointInRect(p, $0.rect) }) { onClickItem?(hit.text) }
+    }
+
+    override func resetCursorRects() {
+        hits.forEach { addCursorRect($0.rect, cursor: .pointingHand) }
+    }
 
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
@@ -185,13 +196,16 @@ final class StatusBarView: FlippedView {
             x += size.width + 18
         }
         x = bounds.width - 12
+        hits = []
         for item in right.reversed() {
             let s = item as NSString
             let size = s.size(withAttributes: attrs)
             x -= size.width
             s.draw(at: NSPoint(x: x, y: (bounds.height - size.height) / 2), withAttributes: attrs)
+            hits.append((NSRect(x: x, y: 0, width: size.width, height: bounds.height), item))
             x -= 18
         }
+        window?.invalidateCursorRects(for: self)
     }
 }
 

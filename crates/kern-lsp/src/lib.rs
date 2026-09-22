@@ -251,6 +251,11 @@ impl Client {
                         "hover": { "contentFormat": ["plaintext", "markdown"] },
                         "signatureHelp": { "signatureInformation": { "documentationFormat": ["plaintext"] } },
                         "definition": { "linkSupport": false },
+                        "typeDefinition": { "linkSupport": false },
+                        "implementation": { "linkSupport": false },
+                        "documentHighlight": {},
+                        "codeLens": {},
+                        "callHierarchy": {},
                         "references": {},
                         "rename": { "prepareSupport": false },
                         "formatting": {},
@@ -425,6 +430,8 @@ pub struct Manager {
 }
 
 const TIMEOUT: Duration = Duration::from_secs(8);
+// code lens: bu sayıdan fazlası varsa tek tek resolve edilmez (her biri ayrı gidiş-dönüş)
+const MAX_RESOLVED_LENSES: usize = 60;
 
 impl Manager {
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -452,6 +459,11 @@ impl Manager {
 
     fn spec(&self, key: &str) -> Option<(PathBuf, Vec<String>)> {
         if let Some((cmd, args)) = self.overrides.lock().unwrap().get(key) {
+            // "./node_modules/.bin/..." gibi göreli yollar proje köküne göre çözülür
+            if cmd.starts_with("./") || cmd.starts_with("../") {
+                let p = self.root.join(cmd);
+                return p.is_file().then(|| (p, args.clone()));
+            }
             return which(cmd).map(|p| (p, args.clone()));
         }
         default_servers(key).into_iter().find_map(|s| which(&s.command).map(|p| (p, s.args)))
@@ -630,6 +642,103 @@ impl Manager {
     pub fn references(&self, path: &Path, line: u32, col: u32) -> Result<Value, String> {
         let r = self.position_request("textDocument/references", path, line, col, json!({ "context": { "includeDeclaration": true } }))?;
         Ok(normalize_locations(r))
+    }
+
+    pub fn type_definition(&self, path: &Path, line: u32, col: u32) -> Result<Value, String> {
+        if !self.doc_client(path).is_some_and(|(c, _)| has_cap(&c.capabilities(), "typeDefinitionProvider")) {
+            return Ok(Value::Array(vec![]));
+        }
+        let r = self.position_request("textDocument/typeDefinition", path, line, col, json!({}))?;
+        Ok(normalize_locations(r))
+    }
+
+    pub fn implementation(&self, path: &Path, line: u32, col: u32) -> Result<Value, String> {
+        if !self.doc_client(path).is_some_and(|(c, _)| has_cap(&c.capabilities(), "implementationProvider")) {
+            return Ok(Value::Array(vec![]));
+        }
+        let r = self.position_request("textDocument/implementation", path, line, col, json!({}))?;
+        Ok(normalize_locations(r))
+    }
+
+    // imleçteki sembolün aynı dosyadaki geçişleri: [{range, kind}] (kind: 1 metin, 2 okuma, 3 yazma)
+    pub fn document_highlights(&self, path: &Path, line: u32, col: u32) -> Result<Value, String> {
+        let (c, _) = self.doc_client(path).ok_or("no language server")?;
+        if !has_cap(&c.capabilities(), "documentHighlightProvider") {
+            return Ok(Value::Array(vec![]));
+        }
+        let r = self.position_request("textDocument/documentHighlight", path, line, col, json!({}))?;
+        let out: Vec<Value> = r
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| {
+                        let range = h.get("range")?.clone();
+                        Some(json!({ "range": range, "kind": h.get("kind").and_then(Value::as_u64).unwrap_or(1) }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Value::Array(out))
+    }
+
+    // [{line, title, command}] — çözülmemiş lens'ler resolve ile tamamlanır
+    pub fn code_lenses(&self, path: &Path) -> Result<Value, String> {
+        let (c, uri) = self.doc_client(path).ok_or("no language server")?;
+        if !has_cap(&c.capabilities(), "codeLensProvider") {
+            return Ok(Value::Array(vec![]));
+        }
+        let r = c.request("textDocument/codeLens", json!({ "textDocument": { "uri": uri } }), TIMEOUT)?;
+        let items = r.as_array().cloned().unwrap_or_default();
+        // resolve tek tek gidip geliyor: çok lens varsa çözülmemiş olanlar atlanır
+        let resolve = items.len() <= MAX_RESOLVED_LENSES;
+        let mut out = Vec::new();
+        for lens in items.into_iter().take(MAX_RESOLVED_LENSES) {
+            let lens = if lens.get("command").is_none() && resolve {
+                c.request("codeLens/resolve", lens.clone(), TIMEOUT).unwrap_or(lens)
+            } else {
+                lens
+            };
+            let Some(line) = lens.pointer("/range/start/line").and_then(Value::as_u64) else { continue };
+            let Some(cmd) = lens.get("command") else { continue };
+            let title = cmd.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+            if title.is_empty() {
+                continue;
+            }
+            out.push(json!({ "line": line, "title": title, "command": cmd }));
+        }
+        Ok(Value::Array(out))
+    }
+
+    // çağrı hiyerarşisi; incoming = true çağıranlar, false çağrılanlar
+    // [{name, detail, uri, range, selectionRange}]
+    pub fn call_hierarchy(&self, path: &Path, line: u32, col: u32, incoming: bool) -> Result<Value, String> {
+        let (c, _) = self.doc_client(path).ok_or("no language server")?;
+        if !has_cap(&c.capabilities(), "callHierarchyProvider") {
+            return Ok(Value::Array(vec![]));
+        }
+        let prepared = self.position_request("textDocument/prepareCallHierarchy", path, line, col, json!({}))?;
+        let Some(item) = prepared.as_array().and_then(|a| a.first()).cloned() else {
+            return Ok(Value::Array(vec![]));
+        };
+        let method = if incoming { "callHierarchy/incomingCalls" } else { "callHierarchy/outgoingCalls" };
+        let r = c.request(method, json!({ "item": item }), TIMEOUT)?;
+        let out: Vec<Value> = r
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|call| {
+                        let it = call.get(if incoming { "from" } else { "to" })?;
+                        Some(json!({
+                            "name": it.get("name").cloned().unwrap_or_default(),
+                            "detail": it.get("detail").cloned().unwrap_or_default(),
+                            "uri": it.get("uri").cloned().unwrap_or_default(),
+                            "range": it.get("selectionRange").or_else(|| it.get("range")).cloned().unwrap_or_default(),
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Value::Array(out))
     }
 
     // {uri: [TextEdit]}
@@ -963,7 +1072,11 @@ mod tests {
     // rust-analyzer kuruluysa: anlamsal renk, satır içi ipucu, katlama, sembol
     #[test]
     fn rust_analyzer_end_to_end() {
-        if which("rust-analyzer").is_none() {
+        // rustup shim'i bileşen kurulu olmasa da var: gerçekten çalışıyor mu diye bak
+        let ok = which("rust-analyzer")
+            .and_then(|p| std::process::Command::new(p).arg("--version").output().ok())
+            .is_some_and(|o| o.status.success());
+        if !ok {
             return;
         }
         let dir = std::env::temp_dir().join(format!("kern-ra-{}", std::process::id()));

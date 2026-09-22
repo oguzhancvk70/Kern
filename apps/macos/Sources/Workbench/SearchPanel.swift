@@ -84,10 +84,20 @@ final class OptionToggle: NSButton {
 }
 
 final class SearchPanel: FlippedView, NSTextFieldDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
-    var startSearch: ((String, UInt8) -> KernSearch?)?
+    // her kök için bir iş; prefix sonuç yollarının başına eklenir ("" = ana klasör)
+    struct SearchJobRef {
+        var job: KernSearch
+        var prefix: String
+    }
+
+    var startSearch: ((String, UInt8) -> [SearchJobRef])?
     var onOpen: ((SearchHit) -> Void)?
+    // sorgu, yerine konacak metin, bayraklar, hedefler ("yol" ya da "yol:satır")
+    var onReplaceAll: ((String, String, UInt8, [String]) -> Void)?
 
     let input = InputBox(placeholder: "Search")
+    let replaceInput = InputBox(placeholder: "Replace")
+    private let replaceButton = NSButton(title: "Replace All", target: nil, action: nil)
     private let title = makeLabel("SEARCH", size: 11, color: Palette.dimText)
     private let caseButton = OptionToggle("Aa", tip: "Match Case")
     private let wordButton = OptionToggle("ab", tip: "Match Whole Word")
@@ -99,7 +109,7 @@ final class SearchPanel: FlippedView, NSTextFieldDelegate, NSOutlineViewDataSour
     private var byPath: [String: SearchGroup] = [:]
     private var count = 0
     private var pending: DispatchWorkItem?
-    private var job: KernSearch?
+    private var jobs: [SearchJobRef] = []
     private var timer: Timer?
     static let limit = 20_000
 
@@ -135,7 +145,33 @@ final class SearchPanel: FlippedView, NSTextFieldDelegate, NSOutlineViewDataSour
         scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
 
-        [title, input, caseButton, wordButton, regexButton, summary, scroll].forEach(addSubview)
+        replaceButton.bezelStyle = .rounded
+        replaceButton.font = .systemFont(ofSize: 11)
+        replaceButton.target = self
+        replaceButton.action = #selector(replaceAll)
+        [title, input, replaceInput, replaceButton, caseButton, wordButton, regexButton, summary, scroll].forEach(addSubview)
+    }
+
+    // görünen sonuçların hepsini değiştir (tek dosya seçiliyse yalnız o dosya)
+    @objc private func replaceAll() {
+        let query = input.field.stringValue
+        guard !query.isEmpty, !groups.isEmpty, let run = onReplaceAll else { return NSSound.beep() }
+        var targets: [String] = []
+        if let g = outline.item(atRow: outline.selectedRow) as? SearchGroup {
+            targets = [g.path]
+        } else if let h = outline.item(atRow: outline.selectedRow) as? SearchHit {
+            targets = ["\(h.path):\(h.line)"]
+        } else {
+            targets = groups.map(\.path)
+        }
+        let alert = NSAlert()
+        alert.messageText = "Replace \(count) match\(count == 1 ? "" : "es")?"
+        alert.informativeText = "\(targets.count) file\(targets.count == 1 ? "" : "s") will be changed on disk."
+        alert.addButton(withTitle: "Replace")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        run(query, replaceInput.field.stringValue, flags, targets)
+        schedule(delay: 0.1)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -148,8 +184,10 @@ final class SearchPanel: FlippedView, NSTextFieldDelegate, NSOutlineViewDataSour
         for (i, b) in [caseButton, wordButton, regexButton].enumerated() {
             b.frame = NSRect(x: w - 12 - 82 + CGFloat(i) * 26, y: 39, width: 24, height: 20)
         }
-        summary.frame = NSRect(x: 20, y: 70, width: w - 40, height: 16)
-        scroll.frame = NSRect(x: 0, y: 92, width: w, height: max(0, bounds.height - 92))
+        replaceInput.frame = NSRect(x: 12, y: 68, width: max(60, w - 24 - 92), height: 26)
+        replaceButton.frame = NSRect(x: w - 12 - 88, y: 69, width: 88, height: 24)
+        summary.frame = NSRect(x: 20, y: 102, width: w - 40, height: 16)
+        scroll.frame = NSRect(x: 0, y: 124, width: w, height: max(0, bounds.height - 124))
         outline.tableColumns.first?.width = w - 4
     }
 
@@ -183,8 +221,8 @@ final class SearchPanel: FlippedView, NSTextFieldDelegate, NSOutlineViewDataSour
 
     private func run() {
         let query = input.field.stringValue
-        job?.cancel()
-        job = nil
+        jobs.forEach { $0.job.cancel() }
+        jobs = []
         timer?.invalidate()
         groups = []
         byPath = [:]
@@ -196,21 +234,28 @@ final class SearchPanel: FlippedView, NSTextFieldDelegate, NSOutlineViewDataSour
             return
         }
         let err = find_error(query, flags).toString()
-        guard err.isEmpty, let j = startSearch(query, flags) else {
+        let started = startSearch(query, flags)
+        guard err.isEmpty, !started.isEmpty else {
             summary.stringValue = err.isEmpty ? "" : err
             summary.textColor = .systemRed
             return
         }
-        job = j
+        jobs = started
         summary.stringValue = "Searching…"
         timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in self?.poll() }
     }
 
-    // sonuçlar geldikçe ekle
+    // sonuçlar geldikçe ekle (çoklu kökte her klasör ayrı iş)
     private func poll() {
-        guard let job else { return timer?.invalidate() ?? () }
-        let done = job.is_done()
-        let raw = job.poll().toString()
+        guard !jobs.isEmpty else { return timer?.invalidate() ?? () }
+        let done = jobs.allSatisfy { $0.job.is_done() }
+        var raw = ""
+        for j in jobs {
+            for line in j.job.poll().toString().split(separator: "\n", omittingEmptySubsequences: true) {
+                // yolu köke göre mutlak yap (birden çok kökte çakışmasın)
+                raw += j.prefix + line + "\n"
+            }
+        }
         var added: [SearchGroup] = []
         for line in raw.split(separator: "\n", omittingEmptySubsequences: true) {
             let f = line.split(separator: "\t", maxSplits: 5, omittingEmptySubsequences: false)
@@ -233,7 +278,7 @@ final class SearchPanel: FlippedView, NSTextFieldDelegate, NSOutlineViewDataSour
         }
         if done {
             timer?.invalidate()
-            self.job = nil
+            self.jobs = []
             summary.stringValue = count == 0
                 ? "No results found."
                 : "\(count)\(count >= Self.limit ? "+" : "") results in \(groups.count) files"

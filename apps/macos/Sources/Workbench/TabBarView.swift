@@ -12,7 +12,12 @@ final class TabBarView: FlippedView {
     var active = -1 { didSet { needsDisplay = true } }
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
+    // (kaynak bar, kaynak sekme, bu bardaki hedef sıra)
+    var onDropTab: ((TabBarView, Int, Int) -> Void)?
+    static let tabIndexType = NSPasteboard.PasteboardType("dev.kern.tab-index")
 
+    private var dragCandidate: Int?
+    private var dropIndex: Int? { didSet { if oldValue != dropIndex { needsDisplay = true } } }
     private var hover = -1
     private var hoverClose = false
     private var offset: CGFloat = 0
@@ -22,6 +27,7 @@ final class TabBarView: FlippedView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         background = Palette.chrome
+        registerForDraggedTypes([Self.tabIndexType])
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -140,7 +146,32 @@ final class TabBarView: FlippedView {
     override func mouseDown(with event: NSEvent) {
         let (i, close) = hit(event)
         guard i >= 0 else { return }
-        close ? onClose?(i) : onSelect?(i)
+        if close { return onClose?(i) ?? () }
+        onSelect?(i)
+        dragCandidate = i
+    }
+
+    // sekmeyi başka gruba (ya da aynı barda başka yere) sürükle
+    override func mouseDragged(with event: NSEvent) {
+        guard let i = dragCandidate, i < items.count else { return }
+        dragCandidate = nil
+        let item = NSPasteboardItem()
+        item.setString(items[i].path.isEmpty ? items[i].title : items[i].path, forType: .string)
+        item.setString(String(i), forType: Self.tabIndexType)
+        let dragItem = NSDraggingItem(pasteboardWriter: item)
+        let rect = tabRects()[i]
+        let image = NSImage(size: rect.size)
+        image.lockFocus()
+        Palette.hover.setFill()
+        NSRect(origin: .zero, size: rect.size).fill()
+        (items[i].title as NSString).draw(at: NSPoint(x: 10, y: 8), withAttributes: [.font: font, .foregroundColor: Palette.text])
+        image.unlockFocus()
+        dragItem.setDraggingFrame(rect, contents: image)
+        beginDraggingSession(with: [dragItem], event: event, source: self)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragCandidate = nil
     }
 
     override func otherMouseDown(with event: NSEvent) {
@@ -152,6 +183,39 @@ final class TabBarView: FlippedView {
         offset -= event.scrollingDeltaX + event.scrollingDeltaY
         clampOffset()
         needsDisplay = true
+    }
+
+    // sürükle-bırak hedefi
+
+    private func dropTarget(_ p: NSPoint) -> Int {
+        let rects = tabRects()
+        for (i, r) in rects.enumerated() where p.x < r.midX { return i }
+        return rects.count
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dropIndex = dropTarget(convert(sender.draggingLocation, from: nil))
+        return .move
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dropIndex = dropTarget(convert(sender.draggingLocation, from: nil))
+        return .move
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        dropIndex = nil
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { dropIndex = nil }
+        guard let source = sender.draggingSource as? TabBarView,
+              let raw = sender.draggingPasteboard.propertyList(forType: Self.tabIndexType) as? String ?? sender
+                  .draggingPasteboard.string(forType: Self.tabIndexType),
+              let from = Int(raw) else { return false }
+        let to = dropTarget(convert(sender.draggingLocation, from: nil))
+        onDropTab?(source, from, to)
+        return true
     }
 
     // erişilebilirlik: her sekme ayrı öğe
@@ -180,6 +244,12 @@ final class TabBarView: FlippedView {
     override func accessibilitySelectedChildren() -> [Any]? {
         guard active >= 0, let children = accessibilityChildren(), active < children.count else { return nil }
         return [children[active]]
+    }
+}
+
+extension TabBarView: NSDraggingSource {
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .move
     }
 }
 

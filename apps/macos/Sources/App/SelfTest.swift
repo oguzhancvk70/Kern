@@ -209,7 +209,9 @@ final class SelfTest {
             self.check("CLI satır/sütun", self.c.activeTab?.editor.cursor_line() == 1 && self.c.activeTab?.editor.cursor_col() == 4)
         }
         step("lsp aç") {
-            try? "int square(int x) { return x * x; }\nint main(void) { return undefined_name; }\n\n".write(to: self.file("e.c"), atomically: true, encoding: .utf8)
+            // son fonksiyon çok satırlı: clangd katlama aralığı ancak böyle döner
+            let src = "int square(int x) { return x * x; }\nint main(void) { return undefined_name; }\n\n\nint helper(int a) {\n  int b = a + 1;\n  return b;\n}\n"
+            try? src.write(to: self.file("e.c"), atomically: true, encoding: .utf8)
             self.c.openFile(self.file("e.c"))
         }
         wait("LSP tanıları", timeout: 20) { self.view?.diagnostics.contains { $0.message.contains("undefined_name") } == true }
@@ -288,6 +290,54 @@ final class SelfTest {
             while self.view?.editor.is_dirty() == true, self.view?.editor.undo() == true {}
             self.c.hideCompletion()
             NSApp.sendAction(#selector(WorkbenchWindowController.saveDocument(_:)), to: self.c, from: nil)
+        }
+        // yeni editör/çalışma alanı özellikleri
+        step("otomatik parantez") {
+            Settings.shared.set("editor.autoClosingBrackets", true)
+            Settings.shared.set("editor.autoSurround", true)
+            try? "".write(to: self.file("pairs.txt"), atomically: true, encoding: .utf8)
+            self.c.openFile(self.file("pairs.txt"))
+            guard let v = self.view else { return self.check("sekme", false) }
+            v.goTo(line: 0, col: 0)
+            v.insertText("(", replacementRange: NSRange(location: NSNotFound, length: 0))
+            self.check("çift kapandı", v.editor.line(0).toString().hasPrefix("()"))
+            self.check("imleç içeride", v.editor.cursor_col() == 1)
+            v.insertText(")", replacementRange: NSRange(location: NSNotFound, length: 0))
+            self.check("kapanışın üstüne yazıldı", v.editor.line(0).toString().hasPrefix("()") && v.editor.cursor_col() == 2)
+            v.insertText("ab", replacementRange: NSRange(location: NSNotFound, length: 0))
+            v.editor.select_range(0, 2, 2)
+            v.insertText("\"", replacementRange: NSRange(location: NSNotFound, length: 0))
+            self.check("seçim sarıldı", v.editor.line(0).toString() == "()\"ab\"")
+        }
+        step("sütun seçimi") {
+            guard let v = self.view else { return self.check("sekme", false) }
+            v.editor.select_all()
+            v.insertText("abcd\nefgh\nij", replacementRange: NSRange(location: NSNotFound, length: 0))
+            v.editor.select_box(0, 1, 2, 3)
+            self.check("üç seçim", v.editor.selections().count == 12)
+            v.insertText("-", replacementRange: NSRange(location: NSNotFound, length: 0))
+            self.check("kutu değişti", v.editor.text().toString() == "a-d\ne-h\ni-")
+        }
+        step(".editorconfig") {
+            let (cfg, isRoot) = EditorConfig.parse("root = true\n[*.py]\nindent_style = space\nindent_size = 2\n", name: "a.py")
+            self.check("root okundu", isRoot)
+            self.check("girinti", cfg.indentSize == 2 && cfg.useSpaces == true)
+            let (other, _) = EditorConfig.parse("[*.js]\nindent_size = 8\n", name: "a.py")
+            self.check("eşleşmeyen bölüm atlandı", other.isEmpty)
+        }
+        step("görevler") {
+            let dir = self.dir.appendingPathComponent(".kern")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? "{ \"tasks\": [ { \"label\": \"build\", \"command\": \"echo\", \"args\": [\"hi\"] } ] }"
+                .write(to: dir.appendingPathComponent("tasks.json"), atomically: true, encoding: .utf8)
+            let runner = TaskRunner()
+            runner.reload(self.dir)
+            self.check("görev okundu", runner.tasks.count == 1 && runner.task(named: "build")?.command == "echo hi")
+        }
+        step("markdown önizleme") {
+            let text = MarkdownPreviewController.render("# Başlık\n\n**kalın** ve `kod`\n").string
+            self.check("başlık", text.hasPrefix("Başlık"))
+            self.check("satır içi biçim", text.contains("kalın ve kod"))
         }
         step("AI (sahte akış)") {
             func sse(_ events: [[String: Any]]) -> [String] {
@@ -395,7 +445,7 @@ final class SelfTest {
             self.c.openFile(self.file("b.rs"))
             self.c.saveSession()
             let s = SessionStore.load(self.dir)
-            self.check("oturum beş sekme", s?.tabs.count == 5)
+            self.check("oturum altı sekme", s?.tabs.count == 6)
             self.check("etkin sekme b.rs", s.map { $0.tabs[$0.active].path.hasSuffix("b.rs") } ?? false)
         }
         accessibilityScenarios()

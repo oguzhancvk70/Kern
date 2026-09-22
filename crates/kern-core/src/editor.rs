@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use kern_syntax::Syntax;
-use kern_text::{Edit, EditKind, FIND_CASE, FIND_REGEX, History, Matcher, is_line_break};
+use kern_text::{Edit, EditKind, FIND_CASE, History, Matcher, is_line_break};
 
 use crate::Document;
 
@@ -477,6 +477,29 @@ impl Editor {
             self.normalize();
         }
         self.goal_col = None;
+        self.history.seal();
+    }
+
+    // sütun (blok) seçimi: her satırda aynı sütun aralığı ayrı bir seçim olur
+    pub fn select_box(&mut self, anchor_line: usize, anchor_col16: usize, head_line: usize, head_col16: usize) {
+        let b = &self.doc.buffer;
+        let (top, bottom) = (anchor_line.min(head_line), anchor_line.max(head_line).min(b.len_lines().saturating_sub(1)));
+        let mut sels: Vec<Selection> = Vec::new();
+        for line in top..=bottom {
+            let len16 = b.line_utf16_len(line);
+            let (a, h) = (anchor_col16.min(len16), head_col16.min(len16));
+            let anchor = self.doc.buffer.utf16_to_char(line, a);
+            let head = self.doc.buffer.utf16_to_char(line, h);
+            if anchor == head && a != h {
+                continue;
+            }
+            sels.push(Selection { anchor, head });
+        }
+        let Some(last) = sels.pop() else { return };
+        self.extra = sels;
+        self.sel = last;
+        self.goal_col = None;
+        self.normalize();
         self.history.seal();
     }
 
@@ -1566,6 +1589,8 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
+    use kern_text::FIND_REGEX;
+
     use super::*;
 
     fn ed(text: &str) -> Editor {
@@ -1723,6 +1748,16 @@ mod tests {
         e.undo();
         assert_eq!(text(&e), "ab\ncd\nef");
         assert_eq!(e.selections().len(), 3);
+    }
+
+    #[test]
+    fn box_selection_spans_lines() {
+        let mut e = ed("abcd\nefgh\nij\n");
+        e.select_box(0, 1, 2, 3);
+        assert_eq!(e.selections().len(), 3);
+        e.type_text("-");
+        // üçüncü satır kısa: seçim satır sonuna kırpılır
+        assert_eq!(text(&e), "a-d\ne-h\ni-\n");
     }
 
     #[test]

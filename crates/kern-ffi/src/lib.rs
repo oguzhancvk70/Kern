@@ -99,6 +99,7 @@ mod ffi {
         fn select_range(&mut self, line: usize, col: usize, len: usize);
         fn selections(&self) -> Vec<u32>;
         fn add_cursor(&mut self, line: usize, col: usize);
+        fn select_box(&mut self, anchor_line: usize, anchor_col: usize, head_line: usize, head_col: usize);
         fn add_cursor_vertical(&mut self, up: bool);
         fn add_next_occurrence(&mut self);
         fn select_all_occurrences(&mut self);
@@ -154,6 +155,7 @@ mod ffi {
         fn file_count(&self) -> usize;
         fn quick_open(&self, query: &str, limit: usize) -> String;
         fn start_search(&self, query: &str, flags: u8, limit: usize) -> Option<KernSearch>;
+        fn replace_all(&self, query: &str, flags: u8, repl: &str, targets: &str) -> String;
     }
 
     extern "Rust" {
@@ -175,6 +177,11 @@ mod ffi {
         fn signature_help(&self, path: &str, line: u32, col: u32) -> String;
         fn definition(&self, path: &str, line: u32, col: u32) -> String;
         fn references(&self, path: &str, line: u32, col: u32) -> String;
+        fn type_definition(&self, path: &str, line: u32, col: u32) -> String;
+        fn implementation(&self, path: &str, line: u32, col: u32) -> String;
+        fn document_highlights(&self, path: &str, line: u32, col: u32) -> String;
+        fn code_lenses(&self, path: &str) -> String;
+        fn call_hierarchy(&self, path: &str, line: u32, col: u32, incoming: bool) -> String;
         fn rename(&self, path: &str, line: u32, col: u32, name: &str) -> String;
         fn formatting(&self, path: &str, tab_size: u32, insert_spaces: bool) -> String;
         fn document_symbols(&self, path: &str) -> String;
@@ -217,6 +224,25 @@ mod ffi {
         fn pull(&self) -> String;
         fn blame(&self, path: &str, line: usize, contents: &str) -> String;
         fn line_changes(&self, path: &str, current: &str) -> String;
+        fn fetch(&self, prune: bool) -> String;
+        fn amend(&self, message: &str, all: bool) -> String;
+        fn head_message(&self) -> String;
+        fn stash_push(&self, message: &str, keep_index: bool) -> String;
+        fn stash_list(&self) -> String;
+        fn stash_apply(&self, name: &str, drop: bool) -> String;
+        fn stash_drop(&self, name: &str) -> String;
+        fn log(&self, limit: usize, path: &str) -> String;
+        fn commit_files(&self, hash: &str) -> String;
+        fn show(&self, rev: &str, path: &str) -> String;
+        fn revert_file(&self, rev: &str, path: &str) -> String;
+        fn tags(&self) -> String;
+        fn tag_create(&self, name: &str, message: &str) -> String;
+        fn tag_delete(&self, name: &str) -> String;
+        fn push_tags(&self) -> String;
+        fn remotes(&self) -> String;
+        fn remote_add(&self, name: &str, url: &str) -> String;
+        fn remote_remove(&self, name: &str) -> String;
+        fn diff_rows(&self, rev: &str, path: &str, current: &str) -> String;
     }
 
     extern "Rust" {
@@ -383,6 +409,12 @@ impl KernWorkspace {
     fn start_search(&self, query: &str, flags: u8, limit: usize) -> Option<KernSearch> {
         self.0.search_stream(query, flags, limit).ok().map(KernSearch)
     }
+
+    // hedefler satır başına "yol" ya da "yol:satır"; dönüş {"ok":"dosya\tadet"} / {"error":...}
+    fn replace_all(&self, query: &str, flags: u8, repl: &str, targets: &str) -> String {
+        let list: Vec<String> = targets.lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
+        vcs_result(self.0.replace_in_files(query, flags, repl, &list).map(|(f, n)| format!("{f}\t{n}")))
+    }
 }
 
 // iş parçacığı güvenli; sonuçlar JSON metni, hata: {"error": "..."}
@@ -454,6 +486,26 @@ impl KernLsp {
 
     fn references(&self, path: &str, line: u32, col: u32) -> String {
         json_result(self.0.references(std::path::Path::new(path), line, col))
+    }
+
+    fn type_definition(&self, path: &str, line: u32, col: u32) -> String {
+        json_result(self.0.type_definition(std::path::Path::new(path), line, col))
+    }
+
+    fn implementation(&self, path: &str, line: u32, col: u32) -> String {
+        json_result(self.0.implementation(std::path::Path::new(path), line, col))
+    }
+
+    fn document_highlights(&self, path: &str, line: u32, col: u32) -> String {
+        json_result(self.0.document_highlights(std::path::Path::new(path), line, col))
+    }
+
+    fn code_lenses(&self, path: &str) -> String {
+        json_result(self.0.code_lenses(std::path::Path::new(path)))
+    }
+
+    fn call_hierarchy(&self, path: &str, line: u32, col: u32, incoming: bool) -> String {
+        json_result(self.0.call_hierarchy(std::path::Path::new(path), line, col, incoming))
     }
 
     fn rename(&self, path: &str, line: u32, col: u32, name: &str) -> String {
@@ -743,6 +795,92 @@ impl KernRepo {
     fn line_changes(&self, path: &str, current: &str) -> String {
         let base = self.0.head_text(std::path::Path::new(path)).unwrap_or_default();
         format_changes(&kern_vcs::line_changes(&base, current))
+    }
+
+    fn fetch(&self, prune: bool) -> String {
+        vcs_result(self.0.fetch(prune))
+    }
+
+    fn amend(&self, message: &str, all: bool) -> String {
+        vcs_result(self.0.amend(message, all))
+    }
+
+    fn head_message(&self) -> String {
+        self.0.head_message().unwrap_or_default()
+    }
+
+    fn stash_push(&self, message: &str, keep_index: bool) -> String {
+        vcs_result(self.0.stash_push(message, keep_index))
+    }
+
+    // satır başına: stash@{n} \t açıklama \t unix zamanı
+    fn stash_list(&self) -> String {
+        self.0.stash_list().map(|l| l.join("\n")).unwrap_or_default()
+    }
+
+    fn stash_apply(&self, name: &str, drop: bool) -> String {
+        vcs_result(self.0.stash_apply(name, drop))
+    }
+
+    fn stash_drop(&self, name: &str) -> String {
+        vcs_result(self.0.stash_drop(name))
+    }
+
+    // satır başına: hash \t kısa \t yazar \t zaman \t özet; path boşsa tüm depo
+    fn log(&self, limit: usize, path: &str) -> String {
+        let p = (!path.is_empty()).then(|| std::path::PathBuf::from(path));
+        self.0.log(limit, p.as_deref()).map(|l| l.join("\n")).unwrap_or_default()
+    }
+
+    // satır başına: durum \t yol
+    fn commit_files(&self, hash: &str) -> String {
+        self.0.commit_files(hash).map(|l| l.join("\n")).unwrap_or_default()
+    }
+
+    fn show(&self, rev: &str, path: &str) -> String {
+        vcs_result(self.0.show(rev, std::path::Path::new(path)))
+    }
+
+    fn revert_file(&self, rev: &str, path: &str) -> String {
+        vcs_result(self.0.revert_file(rev, std::path::Path::new(path)).map(|_| String::new()))
+    }
+
+    fn tags(&self) -> String {
+        self.0.tags().map(|t| t.join("\n")).unwrap_or_default()
+    }
+
+    fn tag_create(&self, name: &str, message: &str) -> String {
+        vcs_result(self.0.tag_create(name, message))
+    }
+
+    fn tag_delete(&self, name: &str) -> String {
+        vcs_result(self.0.tag_delete(name))
+    }
+
+    fn push_tags(&self) -> String {
+        vcs_result(self.0.push_tags())
+    }
+
+    // satır başına: isim \t url
+    fn remotes(&self) -> String {
+        self.0.remotes().map(|r| r.join("\n")).unwrap_or_default()
+    }
+
+    fn remote_add(&self, name: &str, url: &str) -> String {
+        vcs_result(self.0.remote_add(name, url))
+    }
+
+    fn remote_remove(&self, name: &str) -> String {
+        vcs_result(self.0.remote_remove(name))
+    }
+
+    // diff görünümü satırları: eski \t yeni \t tür (-1 = yok); current boşsa diskteki dosya
+    fn diff_rows(&self, rev: &str, path: &str, current: &str) -> String {
+        let p = std::path::Path::new(path);
+        let rev = if rev.is_empty() { "HEAD" } else { rev };
+        let base = self.0.show(rev, p).unwrap_or_default();
+        let cur = if current.is_empty() { std::fs::read_to_string(p).unwrap_or_default() } else { current.to_string() };
+        kern_vcs::diff_rows(&base, &cur).iter().map(|(o, n, k)| format!("{o}\t{n}\t{k}\n")).collect()
     }
 }
 
@@ -1190,6 +1328,12 @@ impl KernEditor {
         let mut g = self.e();
         let e = &mut *g;
         e.add_cursor(line, col);
+    }
+
+    fn select_box(&mut self, anchor_line: usize, anchor_col: usize, head_line: usize, head_col: usize) {
+        let mut g = self.e();
+        let e = &mut *g;
+        e.select_box(anchor_line, anchor_col, head_line, head_col);
     }
 
     fn add_cursor_vertical(&mut self, up: bool) {

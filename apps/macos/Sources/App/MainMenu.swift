@@ -6,6 +6,15 @@ enum MainMenu {
     private static let left = String(UnicodeScalar(NSLeftArrowFunctionKey)!)
     private static let right = String(UnicodeScalar(NSRightArrowFunctionKey)!)
 
+    // File ▸ Open Recent (açılırken doldurulur)
+    private static func recentMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Open Recent")
+        menu.delegate = RecentFoldersMenu.shared
+        item.submenu = menu
+        return item
+    }
+
     static func make() -> NSMenu {
         let main = NSMenu()
 
@@ -28,6 +37,9 @@ enum MainMenu {
             .separator(),
             item("Open…", "openDocument:", "o"),
             item("Open Folder…", "openFolder:", "o", [.command, .shift]),
+            recentMenu(),
+            item("Add Folder to Workspace…", "addFolderToWorkspace:"),
+            item("Remove Folder from Workspace…", "removeFolderFromWorkspace:"),
             .separator(),
             item("Save", "saveDocument:", "s"),
             item("Save As…", "saveDocumentAs:", "s", [.command, .shift]),
@@ -75,6 +87,8 @@ enum MainMenu {
             item("Quick Fix…", "showCodeActions:", ".", [.command]),
             item("Rename Symbol", "renameSymbol:", String(UnicodeScalar(NSF2FunctionKey)!), []),
             item("Format Document", "formatDocument:", "f", [.option, .shift]),
+            item("Peek Definition", "peekDefinition:", String(UnicodeScalar(NSF12FunctionKey)!), [.option]),
+            item("Peek References", "peekReferences:", String(UnicodeScalar(NSF12FunctionKey)!), [.command, .option]),
             .separator(),
             item("Indent Line", "indentLines:", "]"),
             item("Outdent Line", "outdentLines:", "["),
@@ -97,6 +111,10 @@ enum MainMenu {
             item("Unfold All", "unfoldAllRegions:"),
             item("Focus Next Editor Group", "focusNextGroup:", "k", [.command, .option]),
             .separator(),
+            item("Markdown Preview", "showMarkdownPreview:", "v", [.command, .shift]),
+            item("Zen Mode", "toggleZenMode:", "k", [.command, .shift]),
+            item("Maximize Panel", "togglePanelMaximized:"),
+            .separator(),
             item("Zoom In", "zoomIn:", "="),
             item("Zoom Out", "zoomOut:", "-"),
             item("Reset Zoom", "resetZoom:", "0"),
@@ -111,6 +129,10 @@ enum MainMenu {
             item("Go to Symbol in Project…", "goToWorkspaceSymbol:", "t", [.command]),
             item("Go to Definition", "goToDefinition:", String(UnicodeScalar(NSF12FunctionKey)!), []),
             item("Go to References", "goToReferences:", String(UnicodeScalar(NSF12FunctionKey)!), [.shift]),
+            item("Go to Type Definition", "goToTypeDefinition:"),
+            item("Go to Implementation", "goToImplementation:"),
+            item("Show Callers", "showIncomingCalls:", "h", [.command, .shift]),
+            item("Show Calls", "showOutgoingCalls:"),
             item("Problems", "showProblems:", "m", [.command, .shift]),
             item("Install Language Server…", "installLanguageServer:"),
             .separator(),
@@ -122,6 +144,20 @@ enum MainMenu {
             item("Checkout to Branch…", "showBranchPicker:"),
             item("Pull", "gitPull:"),
             item("Push", "gitPush:"),
+            item("Fetch", "gitFetch:"),
+            .separator(),
+            item("Commit History…", "showGitLog:"),
+            item("File History…", "showFileHistory:"),
+            item("Compare with HEAD", "compareWithHead:", "d", [.command, .control]),
+            item("Revert File…", "revertFile:"),
+            .separator(),
+            item("Amend Last Commit…", "gitAmend:"),
+            item("Stash Changes…", "gitStash:"),
+            item("Pop Stash…", "gitStashPop:"),
+            .separator(),
+            item("Tags…", "showTags:"),
+            item("Push Tags", "gitPushTags:"),
+            item("Remotes…", "showRemotes:"),
             .separator(),
             item("Accept Current Change", "acceptCurrentChange:"),
             item("Accept Incoming Change", "acceptIncomingChange:"),
@@ -145,6 +181,10 @@ enum MainMenu {
             item("Run and Debug Panel", "showDebugPanel:", "d", [.command, .shift]),
             item("Debug Console", "toggleDebugConsole:", "y", [.command, .shift]),
             item("Open launch.json", "openLaunchJSON:"),
+            .separator(),
+            item("Run Task…", "runTask:", "t", [.command, .shift, .option]),
+            item("Rerun Last Task", "rerunLastTask:"),
+            item("Open tasks.json", "openTasksFile:"),
         ]))
 
         main.addItem(submenu("AI", [

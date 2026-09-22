@@ -77,6 +77,8 @@ final class WorkbenchView: FlippedView {
 
     var sidebarWidth: CGFloat = 260
     var sidebarVisible = true
+    var zen = false
+    var panelMaximized = false
     var panel = 0
     var hasEditors = false
     var terminalVisible = false
@@ -134,28 +136,31 @@ final class WorkbenchView: FlippedView {
     override func layout() {
         super.layout()
         let w = bounds.width, h = bounds.height
-        let barH: CGFloat = 22, tabsH: CGFloat = 35, act: CGFloat = 48
-        let side = sidebarVisible ? sidebarWidth : 0
+        let barH: CGFloat = zen ? 0 : 22, tabsH: CGFloat = 35, act: CGFloat = zen ? 0 : 48
+        let side = sidebarVisible && !zen ? sidebarWidth : 0
         let body = h - barH
 
+        activity.isHidden = zen
+        status.isHidden = zen
         activity.frame = NSRect(x: 0, y: 0, width: act, height: body)
         activity.selected = sidebarVisible ? panel : nil
         explorer.frame = NSRect(x: act, y: 0, width: side, height: body)
         search.frame = explorer.frame
         ai.frame = explorer.frame
-        explorer.isHidden = !(sidebarVisible && panel == 0)
-        search.isHidden = !(sidebarVisible && panel == 1)
-        ai.isHidden = !(sidebarVisible && panel == 2)
+        explorer.isHidden = zen || !(sidebarVisible && panel == 0)
+        search.isHidden = zen || !(sidebarVisible && panel == 1)
+        ai.isHidden = zen || !(sidebarVisible && panel == 2)
         scm.frame = explorer.frame
-        scm.isHidden = !(sidebarVisible && panel == 3)
+        scm.isHidden = zen || !(sidebarVisible && panel == 3)
         debug.frame = explorer.frame
-        debug.isHidden = !(sidebarVisible && panel == 4)
+        debug.isHidden = zen || !(sidebarVisible && panel == 4)
         handle.frame = NSRect(x: act + side - 2, y: 0, width: 5, height: body)
-        handle.isHidden = !sidebarVisible
+        handle.isHidden = !sidebarVisible || zen
 
         let x = act + side
         let bottomVisible = terminalVisible || consoleVisible
-        let termH = bottomVisible ? min(terminalHeight, body - 160) : 0
+        // panel büyütüldüyse editör alanı kalmaz
+        let termH = bottomVisible ? (panelMaximized ? body : min(terminalHeight, body - 160)) : 0
         let area = body - termH
         let crumbsH: CGFloat = 22
         editorWidth = w - x
@@ -207,6 +212,8 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
     var allTabs: [EditorTab] { groups.flatMap(\.tabs) }
     private var untitledCounter = 0
     private var workspace: KernWorkspace?
+    private var extraFolders: [URL] = []
+    private var extraWorkspaces: [KernWorkspace] = []
     private let queue = DispatchQueue(label: "dev.kern.workspace")
     private var palette: PaletteView?
     private let watcher = FileWatcher()
@@ -220,6 +227,13 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
     var symbolCache: [PaletteItem]?
     var wsSymbolCache: (String, [PaletteItem])?
     var extrasWork: DispatchWorkItem?
+    var occurrenceWork: DispatchWorkItem?
+    // code lens komutları: yol → satır → [komut JSON]; lensVersion: en son istenen belge sürümü
+    var lensCommands: [String: [Int: [String]]] = [:]
+    var lensVersion: [String: UInt64] = [:]
+    var autoSaveWork: DispatchWorkItem?
+    let peek = PeekView()
+    var tasksRunner: TaskRunner?
     var diagnosticCounts = (errors: 0, warnings: 0)
     var inlineRequest = 0
     var acceptingGhost = false
@@ -265,12 +279,49 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         root.explorer.onOpenFolder = { NSApp.sendAction(#selector(AppDelegate.openFolder(_:)), to: nil, from: nil) }
         root.explorer.onFilesChanged = { [weak self] in self?.refreshWorkspace() }
         root.search.startSearch = { [weak self] query, flags in
-            guard let ws = self?.workspace else { return nil }
-            return ws.start_search(query, flags, UInt(SearchPanel.limit))
+            guard let self, let ws = self.workspace, let main = ws.start_search(query, flags, UInt(SearchPanel.limit)) else { return [] }
+            var out = [SearchPanel.SearchJobRef(job: main, prefix: "")]
+            // ek klasörlerin sonuçları klasör adı ön ekiyle gelir
+            for (i, extra) in self.extraWorkspaces.enumerated() where i < self.extraFolders.count {
+                if let job = extra.start_search(query, flags, UInt(SearchPanel.limit)) {
+                    out.append(SearchPanel.SearchJobRef(job: job, prefix: self.extraFolders[i].lastPathComponent + "/"))
+                }
+            }
+            return out
         }
         root.search.onOpen = { [weak self] hit in
-            guard let self, let folder = self.folder else { return }
-            self.openFile(folder.appendingPathComponent(hit.path))?.goTo(line: hit.line, col: hit.col, length: hit.len)
+            guard let self, let url = self.resolveSearchPath(hit.path) else { return }
+            self.openFile(url)?.goTo(line: hit.line, col: hit.col, length: hit.len)
+        }
+        root.search.onReplaceAll = { [weak self] query, repl, flags, targets in
+            guard let self else { return }
+            // açık ve kirli sekmeler diskteki değişimi ezmesin
+            let dirty = self.allTabs.filter { $0.editor.is_dirty() && !$0.path.isEmpty }
+            if !dirty.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = "Save changes before replacing?"
+                alert.informativeText = dirty.map(\.title).joined(separator: ", ")
+                alert.addButton(withTitle: "Save")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+                dirty.forEach { self.save($0) }
+            }
+            // hedefler kök başına ayrılır (ek klasörlerde yol ön ekli gelir)
+            var files = 0, replaced = 0
+            for (i, ws) in ([self.workspace].compactMap { $0 } + self.extraWorkspaces).enumerated() {
+                let prefix = i == 0 ? "" : (i - 1 < self.extraFolders.count ? self.extraFolders[i - 1].lastPathComponent + "/" : "")
+                let mine = targets.filter { i == 0 ? !self.isExtraPath($0) : $0.hasPrefix(prefix) }
+                    .map { prefix.isEmpty ? $0 : String($0.dropFirst(prefix.count)) }
+                guard !mine.isEmpty else { continue }
+                let result = ws.replace_all(query, flags, repl, mine.joined(separator: "\n")).toString()
+                let obj = (try? JSONSerialization.jsonObject(with: Data(result.utf8))) as? [String: Any]
+                if let err = obj?["error"] as? String { return self.report(err) }
+                let parts = (obj?["ok"] as? String ?? "").split(separator: "\t").map { Int($0) ?? 0 }
+                files += parts.first ?? 0
+                replaced += parts.last ?? 0
+            }
+            self.root.status.left = self.root.status.left + ["↻ \(replaced) replaced in \(files) files"]
+            self.filesChanged(targets.compactMap { self.resolveSearchPath(String($0.split(separator: ":").first ?? ""))?.path })
         }
 
         let find = root.findBar
@@ -311,6 +362,14 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             }
             return env
         }
+        root.status.onClickItem = { [weak self] text in
+            guard let self else { return }
+            if text.hasPrefix("⚠ No Language Server") {
+                self.installLanguageServer(nil)
+            } else if text.hasPrefix("⚠ LSP Error"), let tab = self.activeTab, !tab.path.isEmpty {
+                self.report(self.language?.status(tab.path) ?? "LSP error")
+            }
+        }
         watcher.onChange = { [weak self] paths in self?.filesChanged(paths) }
         wireAI()
         wireGit()
@@ -336,7 +395,12 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
 
     private func applyIndent(_ e: KernEditor) {
         let s = Settings.shared
-        e.set_indent(UInt(max(1, s.int("editor.tabSize"))), s.bool("editor.insertSpaces"), s.bool("editor.detectIndentation"))
+        // .editorconfig ayarların üstüne biner, dosya sezgisini kapatır
+        let cfg = EditorConfig.load(for: e.path().toString())
+        let size = cfg.indentSize ?? max(1, s.int("editor.tabSize"))
+        let spaces = cfg.useSpaces ?? s.bool("editor.insertSpaces")
+        let detect = cfg.isEmpty && s.bool("editor.detectIndentation")
+        e.set_indent(UInt(max(1, size)), spaces, detect)
     }
 
     // editör grupları
@@ -353,7 +417,33 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             self.focus(g)
             _ = self.closeTab(i)
         }
+        g.view.tabBar.onDropTab = { [weak self, weak g] bar, from, to in
+            guard let self, let g, let source = self.groups.first(where: { $0.view.tabBar === bar }) else { return }
+            self.moveTab(from: source, index: from, to: g, at: to)
+        }
         return g
+    }
+
+    // sekmeyi gruplar arasında (ya da aynı grupta) taşı
+    private func moveTab(from source: EditorGroup, index: Int, to target: EditorGroup, at position: Int) {
+        guard index >= 0, index < source.tabs.count else { return }
+        let tab = source.tabs.remove(at: index)
+        source.active = min(source.active, source.tabs.count - 1)
+        var at = position
+        if source === target, index < position { at -= 1 }
+        target.tabs.insert(tab, at: min(max(0, at), target.tabs.count))
+        tab.view.removeFromSuperview()
+        // boşalan grup kapanır (tek grup kalmadıysa)
+        if source !== target, source.tabs.isEmpty, groups.count > 1, let i = groups.firstIndex(where: { $0 === source }) {
+            groups.remove(at: i)
+            root.groupViews = groups.map(\.view)
+        }
+        focused = groups.firstIndex { $0 === target } ?? 0
+        root.focusedGroup = focused
+        select(target.tabs.firstIndex { $0 === tab } ?? 0)
+        if source !== target { source.view.tabBar.needsDisplay = true }
+        update()
+        window?.makeFirstResponder(tab.view)
     }
 
     private func focus(_ g: EditorGroup) {
@@ -455,7 +545,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
 
     // terminal
 
-    private func showTerminal() {
+    func showTerminal() {
         root.terminalVisible = true
         root.needsLayout = true
         root.layoutSubtreeIfNeeded()
@@ -466,6 +556,21 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         root.terminalVisible = false
         root.needsLayout = true
         if let view = activeTab?.view { window?.makeFirstResponder(view) }
+    }
+
+    // zen modu: kenar çubuğu, etkinlik çubuğu ve durum çubuğu gizlenir, tam ekrana geçilir
+    @objc func toggleZenMode(_ sender: Any?) {
+        root.zen.toggle()
+        root.needsLayout = true
+        let isFull = window?.styleMask.contains(.fullScreen) ?? false
+        if root.zen != isFull { window?.toggleFullScreen(nil) }
+        if let view = activeTab?.view { window?.makeFirstResponder(view) }
+    }
+
+    @objc func togglePanelMaximized(_ sender: Any?) {
+        guard root.terminalVisible || root.consoleVisible else { return showTerminal() }
+        root.panelMaximized.toggle()
+        root.needsLayout = true
     }
 
     @objc func toggleTerminal(_ sender: Any?) {
@@ -507,14 +612,66 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
         Settings.shared.setProject(url)
         restartLanguage()
         refreshConfigs()
-        UserDefaults.standard.set(url.path, forKey: "lastFolder")
-        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        // self-test geçici klasörü kullanıcının son klasör/son açılanlar listesini kirletmesin
+        if ProcessInfo.processInfo.environment["KERN_SELFTEST"] == nil {
+            UserDefaults.standard.set(url.path, forKey: "lastFolder")
+            RecentFolders.add(url)
+            NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        }
+        extraFolders = []
+        extraWorkspaces = []
         queue.async { [weak self] in
             let ws = KernWorkspace(url.path)
             DispatchQueue.main.async { self?.workspace = ws }
         }
         update()
         if allTabs.allSatisfy(\.isPristine) { restoreSession() }
+    }
+
+    // çoklu kök: ek klasörler arama, hızlı açma ve gezginde görünür (LSP/git ana klasöre bağlı)
+    var allFolders: [URL] { (folder.map { [$0] } ?? []) + extraFolders }
+
+    private func isExtraPath(_ rel: String) -> Bool {
+        extraFolders.contains { rel.hasPrefix($0.lastPathComponent + "/") }
+    }
+
+    // arama/hızlı açma yolunu (ön ekli olabilir) gerçek dosyaya çevir
+    func resolveSearchPath(_ rel: String) -> URL? {
+        for f in extraFolders where rel.hasPrefix(f.lastPathComponent + "/") {
+            return f.appendingPathComponent(String(rel.dropFirst(f.lastPathComponent.count + 1)))
+        }
+        return folder?.appendingPathComponent(rel)
+    }
+
+    @objc func addFolderToWorkspace(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard folder != nil else { return setFolder(url) }
+        guard !allFolders.contains(where: { $0.standardizedFileURL == url.standardizedFileURL }) else { return }
+        extraFolders.append(url)
+        root.explorer.setRoots(allFolders)
+        updateWatch()
+        queue.async { [weak self] in
+            let ws = KernWorkspace(url.path)
+            DispatchQueue.main.async { self?.extraWorkspaces.append(ws) }
+        }
+        update()
+    }
+
+    @objc func removeFolderFromWorkspace(_ sender: Any?) {
+        guard !extraFolders.isEmpty else { return report("No extra folders in this workspace") }
+        let items = extraFolders.enumerated().map { i, url in
+            PaletteItem(title: url.lastPathComponent, detail: url.path) { [weak self] in
+                guard let self, i < self.extraFolders.count else { return }
+                self.extraFolders.remove(at: i)
+                if i < self.extraWorkspaces.count { self.extraWorkspaces.remove(at: i) }
+                self.root.explorer.setRoots(self.allFolders)
+                self.updateWatch()
+            }
+        }
+        showPalette("", provider: { _ in items }, placeholder: "Remove folder from workspace")
     }
 
     // oturum
@@ -629,9 +786,15 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             }
             self.inlineCursorMoved(view)
             self.gitCursorMoved(view)
+            self.scheduleOccurrences(view)
+            self.scheduleAutoSave(tab, edited: edited)
             guard view === self.activeTab?.view else { return }
             self.update(tabsOnly: !edited)
             if edited && !self.root.findBar.isHidden { self.updateFindCount() }
+        }
+        view.onCodeLens = { [weak self, weak tab] line, index in
+            guard let self, let tab else { return }
+            self.runCodeLens(tab, line: line, index: index)
         }
         view.onToggleBreakpoint = { [weak self, weak tab] line in
             guard let self, let tab, !tab.path.isEmpty else { return }
@@ -667,6 +830,7 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func select(_ i: Int) {
+        if Settings.shared.string("files.autoSave") == "onFocusChange" { autoSaveOnFocusChange() }
         let host = group.view.host
         host.subviews.forEach { $0.removeFromSuperview() }
         active = tabs.isEmpty ? -1 : min(max(0, i), tabs.count - 1)
@@ -737,8 +901,11 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
                 guard alert.runModal() == .alertFirstButtonReturn else { return false }
             }
             let s = Settings.shared
-            if s.bool("files.trimTrailingWhitespace") || s.bool("files.insertFinalNewline") {
-                tab.editor.prepare_save(s.bool("files.trimTrailingWhitespace"), s.bool("files.insertFinalNewline"))
+            let cfg = EditorConfig.load(for: tab.path)
+            let trim = cfg.trimTrailingWhitespace ?? s.bool("files.trimTrailingWhitespace")
+            let finalNewline = cfg.insertFinalNewline ?? s.bool("files.insertFinalNewline")
+            if trim || finalNewline {
+                tab.editor.prepare_save(trim, finalNewline)
                 tab.view.changed(edited: true)
             }
             error = tab.editor.save().toString()
@@ -790,7 +957,10 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             + ["⊗ \(diagnosticCounts.errors)  ⚠ \(diagnosticCounts.warnings)"] + (debug.statusText.isEmpty ? [] : [debug.statusText])
             + (git.blame.isEmpty ? [] : [git.blame])
         if let tab, !tab.path.isEmpty, let s = language?.status(tab.path), !s.isEmpty {
-            right.append(s == "ok" ? "{ } LSP" : s.hasPrefix("missing") ? "⚠ No Language Server" : s == "starting" ? "LSP…" : "⚠ LSP Error")
+            // dil sunucusu yoksa tanı da gelmez: durum çubuğundaki uyarı tıklanınca kurulum komutu terminale yazılır
+            right.append(s == "ok" ? "{ } LSP"
+                : s.hasPrefix("missing") ? "⚠ No Language Server — click to install"
+                : s == "starting" ? "LSP…" : "⚠ LSP Error — click for details")
         }
         root.status.right = right
 
@@ -909,6 +1079,11 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             }
         }
         var paths = queue.sync { ws.quick_open(raw, 60).toString() }.split(separator: "\n").map(String.init)
+        // ek klasörler: yollar klasör adı ön ekiyle listelenir
+        for (i, extra) in extraWorkspaces.enumerated() where i < extraFolders.count {
+            let prefix = extraFolders[i].lastPathComponent + "/"
+            paths += queue.sync { extra.quick_open(raw, 30).toString() }.split(separator: "\n").map { prefix + $0 }
+        }
         // boş sorguda önce açık sekmeler
         if raw.isEmpty {
             let open = tabs.reversed().compactMap { t -> String? in
@@ -921,7 +1096,8 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
             let name = (path as NSString).lastPathComponent
             let dir = (path as NSString).deletingLastPathComponent
             return PaletteItem(title: name, detail: dir, icon: FileIcons.icon(for: name, directory: false)) { [weak self] in
-                self?.openFile(folder.appendingPathComponent(path))
+                guard let url = self?.resolveSearchPath(path) else { return }
+                self?.openFile(url)
             }
         }
     }
@@ -938,7 +1114,38 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
     @objc func newDocument(_ sender: Any?) { newUntitled() }
 
     @objc func saveDocument(_ sender: Any?) {
-        if let tab = activeTab { save(tab) }
+        guard let tab = activeTab else { return }
+        // formatOnSave: biçimlendirme düzenlemeleri uygulandıktan sonra kaydet
+        guard Settings.shared.bool("editor.formatOnSave"), !tab.path.isEmpty, ensureLanguage() != nil else {
+            save(tab)
+            return
+        }
+        formatDocument(nil, then: { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.save(tab)
+        })
+    }
+
+    // otomatik kaydetme (files.autoSave)
+    func scheduleAutoSave(_ tab: EditorTab, edited: Bool) {
+        guard edited, Settings.shared.string("files.autoSave") == "afterDelay", !tab.path.isEmpty else { return }
+        autoSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self, weak tab] in
+            guard let self, let tab, !tab.path.isEmpty, tab.editor.is_dirty() else { return }
+            self.save(tab)
+        }
+        autoSaveWork = work
+        let delay = max(200, Settings.shared.int("files.autoSaveDelay"))
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delay), execute: work)
+    }
+
+    // odak değişince kaydet
+    func autoSaveOnFocusChange() {
+        guard ["afterDelay", "onFocusChange"].contains(Settings.shared.string("files.autoSave")) else { return }
+        var seen = Set<ObjectIdentifier>()
+        for t in allTabs where !t.path.isEmpty && t.editor.is_dirty() && seen.insert(ObjectIdentifier(t.doc)).inserted {
+            save(t)
+        }
     }
 
     @objc func saveDocumentAs(_ sender: Any?) {
@@ -1000,6 +1207,10 @@ final class WorkbenchWindowController: NSWindowController, NSWindowDelegate {
 
     @objc func openSettingsJSON(_ sender: Any?) { openFile(Settings.shared.ensureUserFile()) }
     @objc func openKeymapJSON(_ sender: Any?) { openFile(Settings.shared.ensureKeymapFile()) }
+
+    func windowDidResignKey(_ notification: Notification) {
+        autoSaveOnFocusChange()
+    }
 
     func windowDidBecomeKey(_ notification: Notification) {
         Settings.shared.setProject(folder)

@@ -173,6 +173,12 @@ impl Buffer {
         self.rope.line_to_char(line) + content.utf16_cu_to_char(col16)
     }
 
+    // satırın UTF-16 uzunluğu (satır sonu hariç)
+    pub fn line_utf16_len(&self, line: usize) -> usize {
+        let line = line.min(self.len_lines() - 1);
+        self.rope.line(line).slice(..self.line_len(line)).len_utf16_cu()
+    }
+
     pub fn char_to_utf16(&self, idx: usize) -> (usize, usize) {
         let line = self.rope.char_to_line(idx);
         let start = self.rope.line_to_char(line);
