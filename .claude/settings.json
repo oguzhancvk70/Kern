@@ -119,7 +119,8 @@
       "Read(//Users/base/dev/**)",
       "Bash(rm -rf /tmp/claude-501/kern-dd /tmp/claude-501/kern-manual /tmp/claude-501/blametest /tmp/claude-501/kern-cfg2)",
       "Bash(rm -rf ~/Library/Developer/Xcode/DerivedData/* '/Users/base/Library/Developer/Xcode/iOS DeviceSupport/*' ~/Library/Caches/com.apple.dt.Xcode/* ~/.cargo/registry/cache/* ~/Library/Caches/pip/*)",
-      "Bash(brew cleanup *)"
+      "Bash(brew cleanup *)",
+      "Read(//Users/base/dev/.notes/Kern/**)"
     ],
     "additionalDirectories": [
       "/Users/base/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Projects/Kern",
